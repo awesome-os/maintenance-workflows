@@ -1,0 +1,75 @@
+name: Reusable VSIX Release (GitHub Releases + Open VSX)
+
+on:
+  workflow_call:
+    inputs:
+      setup_zig:
+        description: 'Install Zig before running tests'
+        required: false
+        default: false
+        type: boolean
+      tag:
+        description: 'Optional tag override'
+        required: false
+        default: ''
+        type: string
+    secrets:
+      OVSX_PAT:
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  release-vsix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - if: ${{ inputs.setup_zig }}
+        uses: mlugg/setup-zig@v2
+        with:
+          version: '0.14.1'
+
+      - name: Run tests
+        run: node --test test/*.test.mts
+
+      - name: Package .vsix & SHA256SUMS
+        id: pkg
+        run: |
+          NAME=$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).name")
+          VER=$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            if [[ "${GITHUB_REF}" == refs/tags/* ]]; then TAG="${GITHUB_REF#refs/tags/}"; else TAG="v${VER}"; fi
+          fi
+          VSIX="${NAME}-${VER}.vsix"
+          npm exec --yes -- @vscode/vsce package --allow-missing-repository --no-dependencies --out "$VSIX"
+          sha256sum "$VSIX" > SHA256SUMS.txt
+          echo "vsix=$VSIX" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.pkg.outputs.tag }}"
+          VSIX="${{ steps.pkg.outputs.vsix }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$VSIX" SHA256SUMS.txt --clobber
+          else
+            gh release create "$TAG" "$VSIX" SHA256SUMS.txt \
+              --title "${{ steps.pkg.outputs.name }} ${TAG}" \
+              --notes "Automated .vsix release for Awesome-OS Code - OSS, Eclipse Theia, and Open VSX."
+          fi
+
+      - name: Publish to Open VSX (if OVSX_PAT configured)
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          if [ -n "$OVSX_PAT" ]; then
+            npm exec --yes -- ovsx publish "${{ steps.pkg.outputs.vsix }}" -p "$OVSX_PAT"
+          fi
