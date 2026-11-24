@@ -1,0 +1,52 @@
+name: Reusable Tarball Release (tar.zst + SHA256SUMS)
+
+on:
+  workflow_call:
+    inputs:
+      archive_prefix:
+        description: 'Archive prefix (e.g. t2desktop-noctalia)'
+        required: true
+        type: string
+      test_command:
+        description: 'Optional test command to run before packaging'
+        required: false
+        default: ''
+        type: string
+      tag:
+        description: 'Optional tag override'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release-tarball:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Run tests
+        if: ${{ inputs.test_command != '' }}
+        run: ${{ inputs.test_command }}
+
+      - name: Package tar.zst & Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then TAG="${GITHUB_REF#refs/tags/}"; fi
+          OUT="${{ inputs.archive_prefix }}-${TAG}.tar.zst"
+          tar --zstd --exclude='.git' --exclude='node_modules' -cf "$OUT" .
+          sha256sum "$OUT" > SHA256SUMS.txt
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$OUT" SHA256SUMS.txt --clobber
+          else
+            gh release create "$TAG" "$OUT" SHA256SUMS.txt \
+              --title "${{ inputs.archive_prefix }} ${TAG}" \
+              --notes "Automated SHA-256 verified release via awesome-os/maintenance-workflows."
+          fi
