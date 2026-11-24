@@ -26,6 +26,11 @@ on:
         required: false
         default: ''
         type: string
+      icon_path:
+        description: 'Optional .ico path to embed as Win32 PE RT_GROUP_ICON (auto-detects assets/*.ico if omitted)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -45,7 +50,31 @@ jobs:
           BIN="${{ inputs.binary_name }}"
           SRC="${{ inputs.c_source }}"
 
-          zig cc -target x86_64-windows-gnu -O2 "$SRC" ${{ inputs.win_ldflags }} -o "dist/${BIN}.exe"
+          # Auto-embed Win32 PE RT_GROUP_ICON resource so Windows Explorer, Taskbar & Start Menu show the real app icon
+          ICON_FILE="${{ inputs.icon_path }}"
+          if [ -z "$ICON_FILE" ]; then
+            for cand in "assets/${BIN}.ico" "assets/app.ico" "assets/icon.ico" "assets/lumi-white-dragon.ico" "${BIN}.ico" "app.ico" "icon.ico"; do
+              if [ -f "$cand" ]; then
+                ICON_FILE="$cand"
+                break
+              fi
+            done
+          fi
+          RES_OBJ=""
+          if [ -n "$ICON_FILE" ] && [ -f "$ICON_FILE" ]; then
+            printf '1 ICON "%s"\n' "$ICON_FILE" > dist/app.rc
+            if zig rc dist/app.rc dist/app.res 2>/dev/null; then
+              RES_OBJ="dist/app.res"
+              cp "$ICON_FILE" "dist/${BIN}.ico"
+              echo "Embedded Win32 PE icon resource from $ICON_FILE -> dist/${BIN}.exe"
+            else
+              echo "::warning::zig rc failed for $ICON_FILE; continuing without embedded .res"
+            fi
+            rm -f dist/app.rc
+          fi
+
+          zig cc -target x86_64-windows-gnu -O2 "$SRC" $RES_OBJ ${{ inputs.win_ldflags }} -o "dist/${BIN}.exe"
+          rm -f dist/app.res
           zig cc -target x86_64-linux-musl -O2 "$SRC" -o "dist/${BIN}-linux-x64"
           zig cc -target aarch64-linux-musl -O2 "$SRC" -o "dist/${BIN}-linux-arm64"
           zig cc -target aarch64-macos -O2 "$SRC" -o "dist/${BIN}-macos-arm64"
