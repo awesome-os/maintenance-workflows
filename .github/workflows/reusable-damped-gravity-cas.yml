@@ -1,0 +1,153 @@
+name: Reusable Damped Gravity Incremental CAS Build (v11)
+
+on:
+  workflow_call:
+    inputs:
+      kind:
+        description: 'Build kind: rust-lib-and-bin | zig-c-lib'
+        required: true
+        type: string
+      crate_bin:
+        description: 'Cargo binary target name (e.g. pnpm, cargo, uv)'
+        required: false
+        type: string
+        default: ''
+      crate_lib:
+        description: 'Cargo cdylib package name (e.g. libpnpm-ffi, libcargo-ffi, libuvpy-ffi)'
+        required: false
+        type: string
+        default: ''
+      asset_prefix:
+        description: 'Release asset prefix (e.g. pnpm, cargo, uv, libuv)'
+        required: true
+        type: string
+      publish_release:
+        description: 'Publish GitHub Release on tag push'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  # Fast-lane: stamp independent shared C-ABI libs first (seconds, cached via Damped Gravity)
+  fast-lib:
+    if: inputs.crate_lib != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            os_tag: windows-x64
+            ext: dll
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            os_tag: linux-x64
+            ext: so
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            os_tag: macos-arm64
+            ext: dylib
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_INCREMENTAL: '1'
+      CARGO_PROFILE_RELEASE_LTO: 'thin'
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+      CARGO_PROFILE_RELEASE_STRIP: 'symbols'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: damped-gravity-lib-${{ inputs.crate_lib }}-${{ matrix.target }}
+          shared-key: damped-gravity-v11-${{ matrix.target }}
+      - name: Build independent C-ABI lib (${{ inputs.crate_lib }})
+        run: cargo build --release -p ${{ inputs.crate_lib }} --target ${{ matrix.target }}
+      - name: Stage & hash v11 SHA-512
+        shell: bash
+        run: |
+          mkdir -p dist
+          LIB_FILE=$(find "target/${{ matrix.target }}/release" -maxdepth 1 -type f -name "*.${{ matrix.ext }}" | head -n 1)
+          OUT="dist/${{ inputs.asset_prefix }}-${{ matrix.os_tag }}.${{ matrix.ext }}"
+          cp "$LIB_FILE" "$OUT"
+          sha512sum "$OUT" > "$OUT.sha512"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lib-${{ inputs.asset_prefix }}-${{ matrix.os_tag }}
+          path: dist/*
+
+  # Incremental binary build reusing the warmed Damped Gravity Rust crate cache
+  incremental-bin:
+    if: inputs.crate_bin != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            os_tag: windows-x64
+            ext: .exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            os_tag: linux-x64
+            ext: ''
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            os_tag: macos-arm64
+            ext: ''
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_INCREMENTAL: '1'
+      CARGO_PROFILE_RELEASE_LTO: 'thin'
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+      CARGO_PROFILE_RELEASE_STRIP: 'symbols'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: damped-gravity-bin-${{ inputs.crate_bin }}-${{ matrix.target }}
+          shared-key: damped-gravity-v11-${{ matrix.target }}
+      - name: Incremental build (${{ inputs.crate_bin }})
+        run: cargo build --release --bin ${{ inputs.crate_bin }} --target ${{ matrix.target }}
+      - name: Stage & hash v11 SHA-512
+        shell: bash
+        run: |
+          mkdir -p dist
+          OUT="dist/${{ inputs.asset_prefix }}-${{ matrix.os_tag }}${{ matrix.ext }}"
+          cp "target/${{ matrix.target }}/release/${{ inputs.crate_bin }}${{ matrix.ext }}" "$OUT"
+          sha512sum "$OUT" > "$OUT.sha512"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ inputs.asset_prefix }}-${{ matrix.os_tag }}
+          path: dist/*
+
+  publish:
+    if: inputs.publish_release && startsWith(github.ref, 'refs/tags/v')
+    needs: [fast-lib, incremental-bin]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate SHA256SUMS + SHA512SUMS & Publish Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          sha512sum * > SHA512SUMS.txt
+          if gh release view "${GITHUB_REF_NAME}" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" * --clobber -R "${{ github.repository }}"
+          else
+            gh release create "${GITHUB_REF_NAME}" * -R "${{ github.repository }}" \
+              --title "${GITHUB_REF_NAME} — ${{ inputs.asset_prefix }} (Damped Gravity CAS v11)" \
+              --notes "Built incrementally via awesome-os/maintenance-workflows Damped Gravity CAS v11 pipeline (thin LTO + independent C-ABI lib stamping)."
+          fi
