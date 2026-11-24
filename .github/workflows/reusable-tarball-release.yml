@@ -41,12 +41,14 @@ jobs:
           TAG="${{ inputs.tag }}"
           if [ -z "$TAG" ]; then TAG="${GITHUB_REF#refs/tags/}"; fi
           OUT="${{ inputs.archive_prefix }}-${TAG}.tar.zst"
-          tar --zstd --exclude='.git' --exclude='node_modules' -cf "$OUT" .
+          tar --zstd --exclude='.git' --exclude='node_modules' -cf "../${OUT}" .
+          mv "../${OUT}" "./${OUT}"
           sha256sum "$OUT" > SHA256SUMS.txt
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$OUT" SHA256SUMS.txt --clobber
+          sha512sum "$OUT" > SHA512SUMS.txt
+          if gh release view "$TAG" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$OUT" SHA256SUMS.txt SHA512SUMS.txt --clobber -R "${{ github.repository }}"
           else
-            gh release create "$TAG" "$OUT" SHA256SUMS.txt \
+            gh release create "$TAG" "$OUT" SHA256SUMS.txt SHA512SUMS.txt -R "${{ github.repository }}" \
               --title "${{ inputs.archive_prefix }} ${TAG}" \
-              --notes "Automated SHA-256 verified release via awesome-os/maintenance-workflows."
+              --notes "Automated SHA-256 & SHA-512 (v11 CAS) verified release via awesome-os/maintenance-workflows."
           fi
