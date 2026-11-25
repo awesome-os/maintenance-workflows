@@ -34,3 +34,13 @@ jobs:
     secrets:
       OVSX_PAT: ${{ secrets.OVSX_PAT }}
 ```
+
+## Quick Install & Run (Windows / Linux / macOS)
+
+```sh
+# Install / hydrate from v11 CAS via holo-pm
+holo-pm install repository://github.com/awesome-os/maintenance-workflows@main
+
+# Or project & run directly via holo-project (0-byte hardlink)
+holo-project "project://cpp/maintenance-workflows?from=repository://github.com/awesome-os/maintenance-workflows@main"
+```
