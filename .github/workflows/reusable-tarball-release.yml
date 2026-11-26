@@ -39,7 +39,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ inputs.tag }}"
-          if [ -z "$TAG" ]; then TAG="${GITHUB_REF#refs/tags/}"; fi
+          if [ -z "$TAG" ]; then
+            case "$GITHUB_REF" in
+              refs/tags/*) TAG="${GITHUB_REF#refs/tags/}" ;;
+              *) TAG="v0.1.0" ;;
+            esac
+          fi
           OUT="${{ inputs.archive_prefix }}-${TAG}.tar.zst"
           tar --zstd --exclude='.git' --exclude='node_modules' -cf "../${OUT}" .
           mv "../${OUT}" "./${OUT}"
