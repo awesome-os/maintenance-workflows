@@ -9,6 +9,7 @@ import {
   HOLO_CI_SCHEMA,
   loadManifest,
   type HoloCiKind,
+  type HoloCiLockCompatEcosystem,
   type HoloCiManifest,
   type HoloCiPhase,
   type HoloCiReceipt,
@@ -29,6 +30,8 @@ export interface ParsedCliArgs {
   packagePath?: string;
   dryRun: boolean;
   outDir?: string;
+  outFile?: string;
+  ecosystem?: HoloCiLockCompatEcosystem;
   cwd: string;
   force: boolean;
   name?: string;
@@ -47,6 +50,17 @@ const VALID_PHASES = new Set<HoloCiPhase>([
   'lock-compat',
 ]);
 
+const VALID_ECOSYSTEMS = new Set<HoloCiLockCompatEcosystem>([
+  'all',
+  'npm',
+  'cargo',
+  'uv',
+  'go',
+  'vcpkg',
+  'winget',
+  'apt',
+]);
+
 export function getHelpText(): string {
   return [
     'holo-ci — Zero-dependency Awesome-OS CI/CD & CAS v11 runtime',
@@ -62,7 +76,7 @@ export function getHelpText(): string {
     '  telemetry    Emit holo-ci.receipt.v1 JSON/NDJSON and optional GitHub Step Summary',
     '  maintain     Verify clean-box HTTP 200 endpoints, SHA-512 bundles, and Ed25519 signatures',
     '  init         Scaffold a starter holo-ci.json manifest in the target directory',
-    '  lock-compat  Synthesize deterministic lockfileVersion: 3 package-lock.json without mutating node_modules',
+    '  lock-compat  Synthesize zero-copy CAS v11 lock/metadata projections (npm|cargo|uv|go|vcpkg|winget|apt|all)',
     '',
     'Options:',
     '  --config <path>        Path to holo-ci.json (default: holo-ci.json)',
@@ -74,6 +88,8 @@ export function getHelpText(): string {
     '  --package <path>       Path to package.json for `bump` (default: package.json)',
     '  --dry-run              Preview `bump` or `lock-compat` without writing files',
     '  --out <path>           Output directory for `pack` or output lockfile for `lock-compat` (default: package-lock.json)',
+    '  --out-dir <dir>        Output directory for `lock-compat` projections (or `pack`)',
+    '  --ecosystem <name>     Target ecosystem for `lock-compat`: all|npm|cargo|uv|go|vcpkg|winget|apt (default: npm)',
     '  --max-lock <path>      Optional max-version-lock.json override file for `lock-compat`',
     '  --cwd <dir>            Working directory override',
     '  --name <name>          Project name for `init`',
@@ -97,6 +113,8 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
   let packagePath: string | undefined;
   let dryRun = false;
   let outDir: string | undefined;
+  let outFile: string | undefined;
+  let ecosystem: HoloCiLockCompatEcosystem | undefined;
   let cwd = process.cwd();
   let force = false;
   let name: string | undefined;
@@ -124,7 +142,17 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     } else if (arg === '--dry-run') {
       dryRun = true;
     } else if (arg === '--out' && argv[i + 1]) {
+      outFile = argv[++i];
+    } else if (arg === '--out-dir' && argv[i + 1]) {
       outDir = argv[++i];
+    } else if (arg === '--ecosystem' && argv[i + 1]) {
+      const rawEco = argv[++i] as HoloCiLockCompatEcosystem;
+      if (!VALID_ECOSYSTEMS.has(rawEco)) {
+        throw new Error(
+          `Unknown ecosystem "${rawEco}". Expected one of: all, npm, cargo, uv, go, vcpkg, winget, apt.`,
+        );
+      }
+      ecosystem = rawEco;
     } else if (arg === '--max-lock' && argv[i + 1]) {
       maxLockPath = argv[++i];
     } else if (arg === '--cwd' && argv[i + 1]) {
@@ -158,6 +186,8 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     ...(packagePath ? { packagePath } : {}),
     dryRun,
     ...(outDir ? { outDir } : {}),
+    ...(outFile ? { outFile } : {}),
+    ...(ecosystem ? { ecosystem } : {}),
     cwd,
     force,
     ...(name ? { name } : {}),
@@ -222,9 +252,14 @@ export async function executeCli(argv: string[]): Promise<{ exitCode: number; re
       durationMs: Date.now() - start,
     });
   } else if (opts.phase === 'lock-compat') {
+    const ecosystem = opts.ecosystem ?? 'npm';
+    const resolvedOutDir = opts.outDir ?? (ecosystem !== 'npm' ? opts.outFile : undefined);
+    const resolvedOutFile = ecosystem === 'npm' ? opts.outFile : undefined;
     const lockCompat = runLockCompat({
       cwd: opts.cwd,
-      outFile: opts.outDir,
+      ecosystem,
+      outFile: resolvedOutFile,
+      outDir: resolvedOutDir,
       dryRun: opts.dryRun,
       maxLockPath: opts.maxLockPath,
     });
@@ -280,7 +315,7 @@ export async function executeCli(argv: string[]): Promise<{ exitCode: number; re
     } else if (opts.phase === 'pack') {
       const pack = runPack(manifest, {
         cwd: opts.cwd,
-        outDir: opts.outDir,
+        outDir: opts.outDir ?? opts.outFile,
       });
       receipt = buildReceipt({
         manifest,

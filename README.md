@@ -39,27 +39,40 @@ Run directly via native Node 24/26 (`node holo-ci/cli.mts <phase> [options]`):
 | `telemetry` | Emits `holo-ci.receipt.v1` JSON/NDJSON (`--receipt`) and appends Markdown summaries to `$GITHUB_STEP_SUMMARY` (`--emit-summary`). |
 | `maintain` | Performs zero-checkout clean-box HTTP `200`, SHA-512, and Ed25519 signature verification (`node:crypto`). |
 | `init` | Scaffolds a starter `holo-ci.json` manifest in the target directory. |
-| `lock-compat` | Synthesizes a deterministic, byte-sorted npm `lockfileVersion: 3` `package-lock.json` (`holoCasStore: "v11"`, `zeroCopyNodeModules: true`) from `package.json`, `pnpm-lock.yaml`, and `max-version-lock.json` without modifying `node_modules`. |
+| `lock-compat` | Synthesizes zero-copy `v11` CAS lock & metadata projections across 7 ecosystems (`npm`, `cargo`, `uv`, `go`, `vcpkg`, `winget`, `apt`, or `all`) into `--out-dir` without mutating `node_modules` or host package stores. |
 
-Common flags: `--config <path>`, `--receipt <path>`, `--emit-summary`, `--json`, `--cwd <dir>`, `--out <path>`, `--dry-run`, `--max-lock <path>`, `--help`.
+Common flags: `--config <path>`, `--receipt <path>`, `--emit-summary`, `--json`, `--cwd <dir>`, `--out <path>`, `--out-dir <dir>`, `--ecosystem <all|npm|cargo|uv|go|vcpkg|winget|apt>`, `--dry-run`, `--max-lock <path>`, `--help`.
 
 ### Zero-Migration Strangler-Fig Hybrid Workspace Pattern (`holo-ci lock-compat`)
 
-When migrating or interoperating between standard npm tooling and the Awesome-OS `v11` CAS / `pnpm` store without duplicating `node_modules`, use the **Zero-Migration Strangler-Fig Hybrid Workspace Pattern**:
+When migrating or interoperating between native package managers and the Awesome-OS `v11` CAS / `pnpm` store without duplicating `node_modules` or mutating host stores, use the **Zero-Migration Strangler-Fig Hybrid Workspace Pattern**:
 
 1. **Create strangler-fig workspaces cleanly** with npm CLI:
    ```sh
    npm init -w ./workspaces/<pkg>
    ```
 2. **Keep runtime dependencies deduplicated** in the zero-copy `pnpm` / `holo-v11` CAS store (`pnpm-lock.yaml` + `max-version-lock.json`).
-3. **Emit or refresh `package-lock.json` (`lockfileVersion: 3`) without touching `node_modules`**:
+3. **Emit or refresh ecosystem projections without touching `node_modules` or host stores**:
    ```sh
    # Standard npm lockfile-only sync OR zero-dependency holo-ci synthesis
    npm i --package-lock-only
-   node holo-ci/cli.mts lock-compat --cwd . --out package-lock.json --dry-run --json
+   node holo-ci/cli.mts lock-compat --ecosystem npm --cwd . --out package-lock.json --dry-run --json
+
+   # Emit all 7 ecosystem projections into an isolated output directory
+   node holo-ci/cli.mts lock-compat --ecosystem all --cwd . --out-dir dist/lock-compat --json
    ```
 
-`holo-ci lock-compat` reads `package.json` (`name`, `version`, `dependencies`, `devDependencies`, `workspaces`), resolves exact versions/integrity hashes from `pnpm-lock.yaml` and `max-version-lock.json` if present, and emits a deterministic byte-sorted `lockfileVersion: 3` manifest stamped with `"holoCasStore": "v11"` and `"zeroCopyNodeModules": true` while leaving `node_modules` completely untouched.
+Supported `--ecosystem` targets (`default: npm`):
+
+| Ecosystem | Projected Artifacts | Zero-Host-Mutation Invariant |
+| :--- | :--- | :--- |
+| `npm` | `package-lock.json` (`lockfileVersion: 3`, `holoCasStore: "v11"`, `zeroCopyNodeModules: true`) | Never writes `node_modules/.package-lock.json` or mutates `node_modules`. |
+| `cargo` | `.cargo/config.toml` (`[source.crates-io] replace-with = "holo-v11"`) + `holo-cargo-compat.json` | Offline vendor CAS mapping without touching `~/.cargo`. |
+| `uv` | `uv.toml` (`link-mode = "hardlink"`, `cache-dir`) + `requirements.holo-v11.txt` | Hardlink CAS cache projection without touching host Python envs. |
+| `go` | `go.work` (`go 1.24`, CAS proxy metadata) | Discovers local `go.mod` modules with `v11` CAS `GOPROXY` metadata. |
+| `vcpkg` | `vcpkg-configuration.json` + `pkgconfig/*.pc` (`openssl`, `pixman`, `cairo`, `harfbuzz`, `zstd`, `libxml2`) | Pinned `v11` C/C++ library stubs driven by `max-version-lock.json`. |
+| `winget` | `winget-import.holo-v11.json` + `winget-hkcu-arp.holo-v11.json` | Zero-UAC `HKCU` portable ARP registry manifest JSON (`0` MSI installers). |
+| `apt` | `dpkg-status.holo-v11` (`Status: install ok installed` virtual-provides stanzas) | Mandatory ELF `soname` gate on every stanza; zero `/var/lib/dpkg` writes. |
 
 ### 2. 5-OS Native Matrix Release (`reusable-5os-release.yml`)
 ```yaml

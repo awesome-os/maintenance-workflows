@@ -101,7 +101,7 @@ export function formatStepSummaryMarkdown(receipt: HoloCiReceipt): string {
 
   if (receipt.lockCompat) {
     lines.push(
-      `| Lock Compat | \`lockfileVersion: ${receipt.lockCompat.lockfileVersion}\` · ${receipt.lockCompat.packageCount} entries (${receipt.lockCompat.resolvedFromPnpmLock} pnpm, ${receipt.lockCompat.resolvedFromMaxLock} max-lock, dryRun=${receipt.lockCompat.dryRun}) |`,
+      `| Lock Compat | \`ecosystem=${receipt.lockCompat.ecosystem}\` (\`lockfileVersion: ${receipt.lockCompat.lockfileVersion}\`) · ${receipt.lockCompat.artifacts.length} artifacts · ${receipt.lockCompat.packageCount} entries (${receipt.lockCompat.resolvedFromPnpmLock} pnpm, ${receipt.lockCompat.resolvedFromMaxLock} max-lock, dryRun=${receipt.lockCompat.dryRun}) |`,
     );
   }
 

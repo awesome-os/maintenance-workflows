@@ -1,17 +1,34 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
-import type {
-  HoloCiLockCompatPackageEntry,
-  HoloCiLockCompatResult,
-  HoloCiLockfileV3,
+import {
+  B8G_ABI_MAGIC_V3,
+  type HoloCiLockCompatArtifact,
+  type HoloCiLockCompatEcosystem,
+  type HoloCiLockCompatPackageEntry,
+  type HoloCiLockCompatResult,
+  type HoloCiLockCompatSingleEcosystem,
+  type HoloCiLockfileV3,
 } from './schema.mts';
+
+export interface AptCompatStanzaInput {
+  package: string;
+  version: string;
+  architecture?: string;
+  soname?: string;
+  provides?: string[];
+  v11Sha512?: string;
+  description?: string;
+}
 
 export interface LockCompatOptions {
   cwd?: string;
+  ecosystem?: HoloCiLockCompatEcosystem;
   outFile?: string;
+  outDir?: string;
   dryRun?: boolean;
   maxLockPath?: string;
+  aptStanzas?: AptCompatStanzaInput[];
 }
 
 interface PackageJsonShape {
@@ -38,8 +55,109 @@ interface MaxVersionLockFile {
   packages?: Record<string, string>;
 }
 
+interface PinnedV11CppLib {
+  readonly name: string;
+  readonly pcName: string;
+  readonly defaultVersion: string;
+  readonly aptPackage: string;
+  readonly aptProvides: string[];
+  readonly soname: string;
+  readonly wingetId: string;
+  readonly libsFlag: string;
+  readonly description: string;
+}
+
+const PINNED_V11_CPP_LIBS: readonly PinnedV11CppLib[] = [
+  {
+    name: 'cairo',
+    pcName: 'cairo',
+    defaultVersion: '1.18.4',
+    aptPackage: 'libcairo2',
+    aptProvides: ['holo-v11-cairo', 'libcairo-v11'],
+    soname: 'libcairo.so.2',
+    wingetId: 'AwesomeOS.V11.Cairo',
+    libsFlag: '-lcairo',
+    description: '2D graphics library (Holo v11 CAS)',
+  },
+  {
+    name: 'harfbuzz',
+    pcName: 'harfbuzz',
+    defaultVersion: '10.2.0',
+    aptPackage: 'libharfbuzz0b',
+    aptProvides: ['holo-v11-harfbuzz', 'libharfbuzz-v11'],
+    soname: 'libharfbuzz.so.0',
+    wingetId: 'AwesomeOS.V11.HarfBuzz',
+    libsFlag: '-lharfbuzz',
+    description: 'OpenType text shaping engine (Holo v11 CAS)',
+  },
+  {
+    name: 'libxml2',
+    pcName: 'libxml-2.0',
+    defaultVersion: '2.13.8',
+    aptPackage: 'libxml2',
+    aptProvides: ['holo-v11-libxml2', 'libxml2-v11'],
+    soname: 'libxml2.so.2',
+    wingetId: 'AwesomeOS.V11.LibXML2',
+    libsFlag: '-lxml2',
+    description: 'GNOME XML library (Holo v11 CAS)',
+  },
+  {
+    name: 'openssl',
+    pcName: 'openssl',
+    defaultVersion: '4.1.0',
+    aptPackage: 'libssl3t64',
+    aptProvides: ['libssl3', 'holo-v11-openssl'],
+    soname: 'libssl.so.3',
+    wingetId: 'AwesomeOS.V11.OpenSSL',
+    libsFlag: '-lssl -lcrypto',
+    description: 'Secure Sockets Layer and cryptography libraries (Holo v11 CAS)',
+  },
+  {
+    name: 'pixman',
+    pcName: 'pixman-1',
+    defaultVersion: '0.46.0',
+    aptPackage: 'libpixman-1-0',
+    aptProvides: ['holo-v11-pixman', 'libpixman-v11'],
+    soname: 'libpixman-1.so.0',
+    wingetId: 'AwesomeOS.V11.Pixman',
+    libsFlag: '-lpixman-1',
+    description: 'Pixel-manipulation library for X and cairo (Holo v11 CAS)',
+  },
+  {
+    name: 'zstd',
+    pcName: 'libzstd',
+    defaultVersion: '1.5.7',
+    aptPackage: 'libzstd1',
+    aptProvides: ['holo-v11-zstd', 'libzstd-v11'],
+    soname: 'libzstd.so.1',
+    wingetId: 'AwesomeOS.V11.Zstd',
+    libsFlag: '-lzstd',
+    description: 'Fast lossless compression algorithm (Holo v11 CAS)',
+  },
+];
+
+const ALL_ECOSYSTEMS: readonly HoloCiLockCompatSingleEcosystem[] = [
+  'npm',
+  'cargo',
+  'uv',
+  'go',
+  'vcpkg',
+  'winget',
+  'apt',
+];
+
+const ELF_SONAME_RE = /^[A-Za-z0-9_+.-]+\.so(?:\.[0-9]+)*$/;
+
 function byteCompare(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function sha256Text(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+function sha512Text(text: string): string {
+  return createHash('sha512').update(text, 'utf8').digest('hex');
 }
 
 function sortStringRecord(rec: Record<string, string> | undefined): Record<string, string> | undefined {
@@ -69,10 +187,8 @@ function normalizePnpmVersion(rawVersion: string): string {
   if (cleaned.startsWith('link:') || cleaned.startsWith('workspace:')) {
     return cleaned;
   }
-  // Strip peer suffix like `2.1.5(hono@4.13.16)` or `10.13.0(supports-color@7.2.0)`
   const parenIdx = cleaned.indexOf('(');
   const withoutPeers = parenIdx === -1 ? cleaned : cleaned.slice(0, parenIdx);
-  // Handle npm alias like `typescript@7.0.2`
   const atIdx = withoutPeers.lastIndexOf('@');
   if (atIdx > 0) {
     return withoutPeers.slice(atIdx + 1);
@@ -159,7 +275,6 @@ export function parsePnpmLock(pnpmLockText: string): {
     }
   }
 
-  // Second pass to backfill integrity hashes discovered after importers section
   for (const [pkgName, entry] of resolved.entries()) {
     if (!entry.integrity) {
       const integrity = integrityByPkgVersion.get(`${pkgName}@${entry.version}`);
@@ -257,14 +372,59 @@ function resolveWorkspaceDirs(cwd: string, workspacesField: PackageJsonShape['wo
   return Array.from(dirs).sort((a, b) => byteCompare(relative(cwd, a), relative(cwd, b)));
 }
 
-export function runLockCompat(opts: LockCompatOptions = {}): HoloCiLockCompatResult {
-  const cwd = resolve(opts.cwd ?? process.cwd());
+function emitProjectionFile(
+  artifacts: HoloCiLockCompatArtifact[],
+  ecosystem: HoloCiLockCompatSingleEcosystem,
+  baseOutDir: string,
+  targetPath: string,
+  content: string,
+  dryRun: boolean,
+): HoloCiLockCompatArtifact {
+  if (!dryRun) {
+    mkdirSync(dirname(targetPath), { recursive: true });
+    writeFileSync(targetPath, content, 'utf8');
+  }
+  const relPath = relative(baseOutDir, targetPath).replace(/\\/g, '/');
+  const artifact: HoloCiLockCompatArtifact = {
+    ecosystem,
+    path: targetPath,
+    relPath: relPath || basename(targetPath),
+    bytes: Buffer.byteLength(content, 'utf8'),
+    sha256: sha256Text(content),
+    written: !dryRun,
+  };
+  artifacts.push(artifact);
+  return artifact;
+}
+
+function synthesizeNpmLock(
+  cwd: string,
+  baseOutDir: string,
+  explicitOutFile: string | undefined,
+  requirePackageJson: boolean,
+  maxLockOverrides: Map<string, string>,
+  dryRun: boolean,
+  artifacts: HoloCiLockCompatArtifact[],
+): {
+  rootName: string;
+  rootVersion: string;
+  outFile: string;
+  packageCount: number;
+  workspaceCount: number;
+  resolvedFromPnpmLock: number;
+  resolvedFromMaxLock: number;
+  sha256: string;
+  lockfile: HoloCiLockfileV3;
+} {
   const pkgPath = resolve(cwd, 'package.json');
-  if (!existsSync(pkgPath)) {
+  const hasPkgJson = existsSync(pkgPath);
+  if (requirePackageJson && !hasPkgJson) {
     throw new Error(`package.json not found at ${pkgPath}`);
   }
 
-  const rootPkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as PackageJsonShape;
+  const rootPkg: PackageJsonShape = hasPkgJson
+    ? (JSON.parse(readFileSync(pkgPath, 'utf8')) as PackageJsonShape)
+    : { name: basename(cwd), version: '0.0.0' };
   const rootName = rootPkg.name?.trim() || basename(cwd);
   const rootVersion = rootPkg.version?.trim() || '0.0.0';
 
@@ -272,8 +432,6 @@ export function runLockCompat(opts: LockCompatOptions = {}): HoloCiLockCompatRes
   const pnpmParsed = existsSync(pnpmLockPath)
     ? parsePnpmLock(readFileSync(pnpmLockPath, 'utf8'))
     : { resolved: new Map<string, PnpmResolvedEntry>(), integrityByPkgVersion: new Map<string, string>() };
-
-  const maxLockOverrides = loadMaxVersionOverrides(cwd, opts.maxLockPath);
 
   const workspaceGlobs = Array.isArray(rootPkg.workspaces)
     ? [...rootPkg.workspaces]
@@ -331,8 +489,7 @@ export function runLockCompat(opts: LockCompatOptions = {}): HoloCiLockCompatRes
     });
   };
 
-  // Register workspace packages first so workspace references link cleanly without touching node_modules
-  const workspaceDirs = resolveWorkspaceDirs(cwd, rootPkg.workspaces);
+  const workspaceDirs = hasPkgJson ? resolveWorkspaceDirs(cwd, rootPkg.workspaces) : [];
   for (const wsDir of workspaceDirs) {
     const wsRel = relative(cwd, wsDir).replace(/\\/g, '/');
     const wsPkg = JSON.parse(readFileSync(join(wsDir, 'package.json'), 'utf8')) as PackageJsonShape;
@@ -376,7 +533,6 @@ export function runLockCompat(opts: LockCompatOptions = {}): HoloCiLockCompatRes
     }
   }
 
-  // Deterministic byte-sorted `packages` map
   const sortedPackages: Record<string, HoloCiLockCompatPackageEntry> = {};
   for (const key of Array.from(packagesUnsorted.keys()).sort(byteCompare)) {
     const entry = packagesUnsorted.get(key);
@@ -394,30 +550,559 @@ export function runLockCompat(opts: LockCompatOptions = {}): HoloCiLockCompatRes
   };
 
   const serialized = `${JSON.stringify(lockfile, null, 2)}\n`;
-  const sha256 = createHash('sha256').update(serialized, 'utf8').digest('hex');
-  const outFile = resolve(cwd, opts.outFile ?? 'package-lock.json');
-  const dryRun = Boolean(opts.dryRun);
+  const outFile = explicitOutFile ? resolve(cwd, explicitOutFile) : resolve(baseOutDir, 'package-lock.json');
+  const artifact = emitProjectionFile(artifacts, 'npm', baseOutDir, outFile, serialized, dryRun);
 
-  if (!dryRun) {
-    mkdirSync(dirname(outFile), { recursive: true });
-    writeFileSync(outFile, serialized, 'utf8');
+  return {
+    rootName,
+    rootVersion,
+    outFile,
+    packageCount: Object.keys(sortedPackages).length,
+    workspaceCount: workspaceDirs.length,
+    resolvedFromPnpmLock,
+    resolvedFromMaxLock,
+    sha256: artifact.sha256,
+    lockfile,
+  };
+}
+
+function parseCargoDeps(cwd: string, maxLockOverrides: Map<string, string>): Array<{ name: string; version: string }> {
+  const crates = new Map<string, string>();
+  const cargoTomlPath = resolve(cwd, 'Cargo.toml');
+  if (existsSync(cargoTomlPath)) {
+    const lines = readFileSync(cargoTomlPath, 'utf8').split(/\r?\n/);
+    let inDeps = false;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      if (trimmed.startsWith('[')) {
+        inDeps = /^\[(?:dev-|build-)?dependencies\]$/i.test(trimmed);
+        continue;
+      }
+      if (!inDeps) continue;
+      const simple = /^([A-Za-z0-9_-]+)\s*=\s*"([^"]+)"/.exec(trimmed);
+      if (simple) {
+        crates.set(simple[1], simple[2].replace(/^[~^=<>]+/, '') || '0.0.0');
+        continue;
+      }
+      const inlineTable = /^([A-Za-z0-9_-]+)\s*=\s*\{[^}]*version\s*=\s*"([^"]+)"/.exec(trimmed);
+      if (inlineTable) {
+        crates.set(inlineTable[1], inlineTable[2].replace(/^[~^=<>]+/, '') || '0.0.0');
+      }
+    }
   }
+  for (const [name, version] of crates.entries()) {
+    const overrideVer = maxLockOverrides.get(name);
+    if (overrideVer) crates.set(name, overrideVer);
+  }
+  return Array.from(crates.entries())
+    .sort((a, b) => byteCompare(a[0], b[0]))
+    .map(([name, version]) => ({ name, version }));
+}
+
+function synthesizeCargoCompat(
+  cwd: string,
+  baseOutDir: string,
+  rootName: string,
+  maxLockOverrides: Map<string, string>,
+  dryRun: boolean,
+  artifacts: HoloCiLockCompatArtifact[],
+): number {
+  const crates = parseCargoDeps(cwd, maxLockOverrides);
+  const configToml = [
+    '# Generated by holo-ci lock-compat (v11 CAS zero-copy projection)',
+    '[source.crates-io]',
+    'replace-with = "holo-v11"',
+    '',
+    '[source.holo-v11]',
+    'directory = ".holo-v11/cargo-vendor"',
+    '',
+    '[net]',
+    'offline = true',
+    '',
+  ].join('\n');
+
+  const compatJson = `${JSON.stringify(
+    {
+      schema: 'holo-v11.cargo-compat.v1',
+      abiMagic: B8G_ABI_MAGIC_V3,
+      name: rootName,
+      holoCasStore: 'v11',
+      source: 'crates-io',
+      replaceWith: 'holo-v11',
+      vendorDir: '.holo-v11/cargo-vendor',
+      zeroHostCargoMutation: true,
+      crates: crates.map((c) => ({
+        name: c.name,
+        version: c.version,
+        holoCasStore: 'v11',
+        casSha512: sha512Text(`cargo:${c.name}@${c.version}`),
+      })),
+    },
+    null,
+    2,
+  )}\n`;
+
+  emitProjectionFile(
+    artifacts,
+    'cargo',
+    baseOutDir,
+    resolve(baseOutDir, '.cargo', 'config.toml'),
+    configToml,
+    dryRun,
+  );
+  emitProjectionFile(
+    artifacts,
+    'cargo',
+    baseOutDir,
+    resolve(baseOutDir, 'holo-cargo-compat.json'),
+    compatJson,
+    dryRun,
+  );
+  return crates.length;
+}
+
+function parsePythonRequirements(cwd: string, maxLockOverrides: Map<string, string>): Array<{ name: string; version: string }> {
+  const pkgs = new Map<string, string>();
+  const reqPath = resolve(cwd, 'requirements.txt');
+  if (existsSync(reqPath)) {
+    for (const rawLine of readFileSync(reqPath, 'utf8').split(/\r?\n/)) {
+      const line = rawLine.split('#')[0]?.trim() ?? '';
+      if (!line || line.startsWith('-')) continue;
+      const m = /^([A-Za-z0-9_.-]+)\s*(?:==|>=|~=|<=)?\s*([A-Za-z0-9_.*+-]+)?/.exec(line);
+      if (m) {
+        const name = m[1].toLowerCase();
+        const ver = m[2] && m[2] !== '*' ? m[2] : '0.0.0';
+        pkgs.set(name, maxLockOverrides.get(name) ?? ver);
+      }
+    }
+  }
+  const pyprojectPath = resolve(cwd, 'pyproject.toml');
+  if (existsSync(pyprojectPath)) {
+    const text = readFileSync(pyprojectPath, 'utf8');
+    const depsBlock = /dependencies\s*=\s*\[([\s\S]*?)\]/.exec(text);
+    if (depsBlock) {
+      const entries = depsBlock[1].matchAll(/["']([A-Za-z0-9_.-]+)(?:\s*(?:==|>=|~=|<=)\s*([^"'\s,;]+))?[^"']*["']/g);
+      for (const m of entries) {
+        const name = m[1].toLowerCase();
+        if (!pkgs.has(name)) {
+          pkgs.set(name, maxLockOverrides.get(name) ?? (m[2] || '0.0.0'));
+        }
+      }
+    }
+  }
+  return Array.from(pkgs.entries())
+    .sort((a, b) => byteCompare(a[0], b[0]))
+    .map(([name, version]) => ({ name, version }));
+}
+
+function synthesizeUvCompat(
+  cwd: string,
+  baseOutDir: string,
+  maxLockOverrides: Map<string, string>,
+  dryRun: boolean,
+  artifacts: HoloCiLockCompatArtifact[],
+): number {
+  const pkgs = parsePythonRequirements(cwd, maxLockOverrides);
+  const uvToml = [
+    '# Generated by holo-ci lock-compat (v11 CAS zero-copy projection)',
+    'link-mode = "hardlink"',
+    'cache-dir = ".holo-v11/uv-cache"',
+    'offline = true',
+    'compile-bytecode = false',
+    '',
+  ].join('\n');
+
+  const reqLines = [
+    '# Generated by holo-ci lock-compat (holo-cas: v11, zero-copy hardlink)',
+    ...pkgs.map((p) => `${p.name}==${p.version} # holo-cas: v11`),
+    '',
+  ].join('\n');
+
+  emitProjectionFile(artifacts, 'uv', baseOutDir, resolve(baseOutDir, 'uv.toml'), uvToml, dryRun);
+  emitProjectionFile(
+    artifacts,
+    'uv',
+    baseOutDir,
+    resolve(baseOutDir, 'requirements.holo-v11.txt'),
+    reqLines,
+    dryRun,
+  );
+  return pkgs.length;
+}
+
+function discoverGoModuleDirs(cwd: string): string[] {
+  const dirs: string[] = [];
+  if (existsSync(resolve(cwd, 'go.mod'))) {
+    dirs.push('.');
+  }
+  const entries = readdirSync(cwd, { withFileTypes: true }).sort((a, b) => byteCompare(a.name, b.name));
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+    if (existsSync(join(cwd, entry.name, 'go.mod'))) {
+      dirs.push(`./${entry.name}`);
+    }
+  }
+  return dirs.sort(byteCompare);
+}
+
+function synthesizeGoCompat(
+  cwd: string,
+  baseOutDir: string,
+  dryRun: boolean,
+  artifacts: HoloCiLockCompatArtifact[],
+): number {
+  const modDirs = discoverGoModuleDirs(cwd);
+  const lines = [
+    '// Generated by holo-ci lock-compat (v11 CAS zero-copy projection)',
+    `// abiMagic: ${B8G_ABI_MAGIC_V3}`,
+    '// holoCasStore: v11',
+    '// GOPROXY=file:///var/lib/b8g/cas/v11/go-proxy,direct',
+    '// GOSUMDB=off',
+    '',
+    'go 1.24',
+  ];
+  if (modDirs.length > 0) {
+    lines.push('', 'use (');
+    for (const d of modDirs) {
+      lines.push(`\t${d}`);
+    }
+    lines.push(')');
+  }
+  lines.push('');
+
+  emitProjectionFile(artifacts, 'go', baseOutDir, resolve(baseOutDir, 'go.work'), lines.join('\n'), dryRun);
+  return modDirs.length;
+}
+
+function resolvePinnedCppLibs(maxLockOverrides: Map<string, string>): Array<PinnedV11CppLib & { version: string }> {
+  return [...PINNED_V11_CPP_LIBS]
+    .sort((a, b) => byteCompare(a.name, b.name))
+    .map((lib) => ({
+      ...lib,
+      version: maxLockOverrides.get(lib.name) ?? lib.defaultVersion,
+    }));
+}
+
+function synthesizeVcpkgCompat(
+  baseOutDir: string,
+  maxLockOverrides: Map<string, string>,
+  dryRun: boolean,
+  artifacts: HoloCiLockCompatArtifact[],
+): number {
+  const libs = resolvePinnedCppLibs(maxLockOverrides);
+  const pinnedLibraries: Record<string, { version: string; pkgConfig: string; soname: string; holoCasStore: 'v11' }> = {};
+  for (const lib of libs) {
+    pinnedLibraries[lib.name] = {
+      version: lib.version,
+      pkgConfig: `pkgconfig/${lib.pcName}.pc`,
+      soname: lib.soname,
+      holoCasStore: 'v11',
+    };
+  }
+
+  const vcpkgConfig = `${JSON.stringify(
+    {
+      $schema: 'https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg-configuration.schema.json',
+      holoCasStore: 'v11',
+      abiMagic: B8G_ABI_MAGIC_V3,
+      'default-registry': {
+        kind: 'filesystem',
+        path: '.holo-v11/vcpkg-registry',
+        baseline: 'holo-v11-cas',
+      },
+      'overlay-ports': ['.holo-v11/vcpkg-ports'],
+      'overlay-triplets': ['.holo-v11/vcpkg-triplets'],
+      pinnedLibraries,
+    },
+    null,
+    2,
+  )}\n`;
+
+  emitProjectionFile(
+    artifacts,
+    'vcpkg',
+    baseOutDir,
+    resolve(baseOutDir, 'vcpkg-configuration.json'),
+    vcpkgConfig,
+    dryRun,
+  );
+
+  for (const lib of libs) {
+    const pcText = [
+      'prefix=/var/lib/b8g/cas/v11/sysroot',
+      'exec_prefix=${prefix}',
+      'libdir=${exec_prefix}/lib',
+      'includedir=${prefix}/include',
+      '',
+      `Name: ${lib.name}`,
+      `Description: ${lib.description}`,
+      `Version: ${lib.version}`,
+      `Libs: -L\${libdir} ${lib.libsFlag}`,
+      'Cflags: -I${includedir}',
+      'X-Holo-CAS-Store: v11',
+      `X-Holo-V11-Lib: ${lib.name}`,
+      `X-Holo-ELF-SONAME: ${lib.soname}`,
+      '',
+    ].join('\n');
+    emitProjectionFile(
+      artifacts,
+      'vcpkg',
+      baseOutDir,
+      resolve(baseOutDir, 'pkgconfig', `${lib.pcName}.pc`),
+      pcText,
+      dryRun,
+    );
+  }
+  return libs.length;
+}
+
+function synthesizeWingetCompat(
+  baseOutDir: string,
+  rootName: string,
+  maxLockOverrides: Map<string, string>,
+  dryRun: boolean,
+  artifacts: HoloCiLockCompatArtifact[],
+): number {
+  const libs = resolvePinnedCppLibs(maxLockOverrides);
+  const wingetImport = `${JSON.stringify(
+    {
+      $schema: 'https://aka.ms/winget-packages.schema.2.0.json',
+      WinGetVersion: '1.9.0',
+      holoCasStore: 'v11',
+      abiMagic: B8G_ABI_MAGIC_V3,
+      msiInstallerCount: 0,
+      uacElevationRequired: false,
+      Sources: [
+        {
+          SourceDetails: {
+            Name: 'holo-v11-cas',
+            Type: 'Microsoft.PreIndexed.Package',
+            Argument: 'cas://v11/winget',
+          },
+          Packages: libs.map((lib) => ({
+            PackageIdentifier: lib.wingetId,
+            Version: lib.version,
+            InstallerType: 'portable',
+            Scope: 'user',
+            HoloCasStore: 'v11',
+          })),
+        },
+      ],
+    },
+    null,
+    2,
+  )}\n`;
+
+  const hkcuArpManifest = `${JSON.stringify(
+    {
+      schema: 'holo-v11.hkcu-arp.v1',
+      abiMagic: B8G_ABI_MAGIC_V3,
+      workspace: rootName,
+      hive: 'HKEY_CURRENT_USER',
+      keyPath: 'Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+      uacElevationRequired: false,
+      msiInstallerCount: 0,
+      holoCasStore: 'v11',
+      entries: libs.map((lib) => {
+        const digest = sha512Text(`winget:${lib.wingetId}@${lib.version}`);
+        return {
+          registryKey: `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${lib.wingetId}`,
+          DisplayName: `${lib.name} (Holo v11 Portable)`,
+          DisplayVersion: lib.version,
+          Publisher: 'Awesome-OS Holo v11',
+          InstallLocation: `%LOCALAPPDATA%\\HoloV11\\cas\\v11\\files\\${digest.slice(0, 2)}\\${digest}`,
+          UninstallString: `holo-pm uninstall ${lib.wingetId}`,
+          InstallerType: 'portable',
+          NoModify: 1,
+          NoRepair: 1,
+          HoloCasStore: 'v11',
+        };
+      }),
+    },
+    null,
+    2,
+  )}\n`;
+
+  emitProjectionFile(
+    artifacts,
+    'winget',
+    baseOutDir,
+    resolve(baseOutDir, 'winget-import.holo-v11.json'),
+    wingetImport,
+    dryRun,
+  );
+  emitProjectionFile(
+    artifacts,
+    'winget',
+    baseOutDir,
+    resolve(baseOutDir, 'winget-hkcu-arp.holo-v11.json'),
+    hkcuArpManifest,
+    dryRun,
+  );
+  return libs.length;
+}
+
+function buildAptStanzaText(input: AptCompatStanzaInput): string {
+  const pkgName = input.package.trim();
+  if (!pkgName) {
+    throw new Error('apt stanza requires a non-empty package name');
+  }
+  const soname = input.soname?.trim() ?? '';
+  if (!soname || !ELF_SONAME_RE.test(soname)) {
+    throw new Error(`apt stanza "${pkgName}" requires a valid mandatory ELF soname (got "${soname}")`);
+  }
+  const arch = input.architecture?.trim() || 'amd64';
+  const version = input.version.trim() || '0.0.0';
+  const provides = [...(input.provides ?? [])].sort(byteCompare);
+  const sha512 =
+    input.v11Sha512 && /^[0-9a-f]{128}$/i.test(input.v11Sha512)
+      ? input.v11Sha512.toLowerCase()
+      : sha512Text(`apt:${pkgName}:${version}:${arch}:${soname}`);
+
+  const lines = [
+    `Package: ${pkgName}`,
+    'Status: install ok installed',
+    'Priority: optional',
+    'Section: libs',
+    `Architecture: ${arch}`,
+    `Version: ${version}`,
+  ];
+  if (provides.length > 0) {
+    lines.push(`Provides: ${provides.join(', ')}`);
+  }
+  lines.push(
+    'X-Holo-CAS-Store: v11',
+    `X-Holo-V11-SHA512: ${sha512}`,
+    `X-Holo-ELF-SONAME: ${soname}`,
+    `Description: ${input.description || `${pkgName} virtual-provides stanza (${soname})`}`,
+  );
+  return lines.join('\n');
+}
+
+function synthesizeAptCompat(
+  baseOutDir: string,
+  maxLockOverrides: Map<string, string>,
+  customStanzas: AptCompatStanzaInput[] | undefined,
+  dryRun: boolean,
+  artifacts: HoloCiLockCompatArtifact[],
+): number {
+  const stanzas: AptCompatStanzaInput[] = customStanzas
+    ? [...customStanzas]
+    : resolvePinnedCppLibs(maxLockOverrides).map((lib) => ({
+        package: lib.aptPackage,
+        version: `${lib.version}-holov11`,
+        architecture: 'amd64',
+        soname: lib.soname,
+        provides: lib.aptProvides,
+        description: lib.description,
+      }));
+
+  stanzas.sort((a, b) => byteCompare(a.package, b.package));
+  const rendered = stanzas.map((stanza) => buildAptStanzaText(stanza));
+  const content = rendered.length > 0 ? `${rendered.join('\n\n')}\n` : '';
+
+  emitProjectionFile(
+    artifacts,
+    'apt',
+    baseOutDir,
+    resolve(baseOutDir, 'dpkg-status.holo-v11'),
+    content,
+    dryRun,
+  );
+  return stanzas.length;
+}
+
+export function runLockCompat(opts: LockCompatOptions = {}): HoloCiLockCompatResult {
+  const cwd = resolve(opts.cwd ?? process.cwd());
+  const ecosystem: HoloCiLockCompatEcosystem = opts.ecosystem ?? 'npm';
+  const dryRun = Boolean(opts.dryRun);
+  const baseOutDir = resolve(cwd, opts.outDir ?? '.');
+  const maxLockOverrides = loadMaxVersionOverrides(cwd, opts.maxLockPath);
+
+  const pkgPath = resolve(cwd, 'package.json');
+  const fallbackName = basename(cwd);
+  let rootName = fallbackName;
+  let rootVersion = '0.0.0';
+  if (existsSync(pkgPath)) {
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as PackageJsonShape;
+    rootName = pkg.name?.trim() || fallbackName;
+    rootVersion = pkg.version?.trim() || '0.0.0';
+  }
+
+  const targetEcosystems: HoloCiLockCompatSingleEcosystem[] =
+    ecosystem === 'all' ? [...ALL_ECOSYSTEMS] : [ecosystem];
+
+  const artifacts: HoloCiLockCompatArtifact[] = [];
+  let outFile = resolve(baseOutDir, 'package-lock.json');
+  let packageCount = 0;
+  let workspaceCount = 0;
+  let resolvedFromPnpmLock = 0;
+  let resolvedFromMaxLock = 0;
+  let npmLockfile: HoloCiLockfileV3 | undefined;
+
+  for (const target of targetEcosystems) {
+    if (target === 'npm') {
+      const npmOut = synthesizeNpmLock(
+        cwd,
+        baseOutDir,
+        ecosystem === 'npm' ? opts.outFile : undefined,
+        ecosystem === 'npm',
+        maxLockOverrides,
+        dryRun,
+        artifacts,
+      );
+      rootName = npmOut.rootName;
+      rootVersion = npmOut.rootVersion;
+      outFile = npmOut.outFile;
+      packageCount += npmOut.packageCount;
+      workspaceCount = npmOut.workspaceCount;
+      resolvedFromPnpmLock = npmOut.resolvedFromPnpmLock;
+      resolvedFromMaxLock = npmOut.resolvedFromMaxLock;
+      npmLockfile = npmOut.lockfile;
+    } else if (target === 'cargo') {
+      packageCount += synthesizeCargoCompat(cwd, baseOutDir, rootName, maxLockOverrides, dryRun, artifacts);
+    } else if (target === 'uv') {
+      packageCount += synthesizeUvCompat(cwd, baseOutDir, maxLockOverrides, dryRun, artifacts);
+    } else if (target === 'go') {
+      packageCount += synthesizeGoCompat(cwd, baseOutDir, dryRun, artifacts);
+    } else if (target === 'vcpkg') {
+      packageCount += synthesizeVcpkgCompat(baseOutDir, maxLockOverrides, dryRun, artifacts);
+    } else if (target === 'winget') {
+      packageCount += synthesizeWingetCompat(baseOutDir, rootName, maxLockOverrides, dryRun, artifacts);
+    } else if (target === 'apt') {
+      packageCount += synthesizeAptCompat(baseOutDir, maxLockOverrides, opts.aptStanzas, dryRun, artifacts);
+    }
+  }
+
+  if (ecosystem !== 'npm' && artifacts.length > 0 && !npmLockfile) {
+    outFile = artifacts[0].path;
+  }
+
+  const compositeDigestInput = artifacts.map((a) => `${a.ecosystem}:${a.relPath}:${a.sha256}`).join('\n');
+  const overallSha256 =
+    ecosystem === 'npm' && artifacts.length === 1 ? artifacts[0].sha256 : sha256Text(compositeDigestInput);
 
   return {
     ok: true,
+    ecosystem,
+    ecosystemsGenerated: targetEcosystems,
     name: rootName,
     version: rootVersion,
     outFile,
+    outDir: baseOutDir,
     dryRun,
     written: !dryRun,
     lockfileVersion: 3,
     holoCasStore: 'v11',
     zeroCopyNodeModules: true,
-    packageCount: Object.keys(sortedPackages).length,
-    workspaceCount: workspaceDirs.length,
+    packageCount,
+    workspaceCount,
     resolvedFromPnpmLock,
     resolvedFromMaxLock,
-    sha256,
-    lockfile,
+    sha256: overallSha256,
+    artifacts,
+    ...(npmLockfile ? { lockfile: npmLockfile } : {}),
   };
 }

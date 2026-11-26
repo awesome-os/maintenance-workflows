@@ -473,6 +473,138 @@ describe('holo-ci lock-compat', () => {
       rmSync(dirB, { recursive: true, force: true });
     }
   });
+
+  it('projects all 7 ecosystems via --ecosystem all into outDir without mutating host stores', () => {
+    const dir = makeTempDir('holo-ci-lock-7eco-');
+    try {
+      mkdirSync(join(dir, 'node_modules', '.sentinel'), { recursive: true });
+      writeFileSync(join(dir, 'node_modules', '.sentinel', 'keep.txt'), 'untouched', 'utf8');
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({ name: 'polyglot-demo', version: '3.1.0', dependencies: { zod: '^3.25.0' } }),
+        'utf8',
+      );
+      writeFileSync(
+        join(dir, 'Cargo.toml'),
+        ['[package]', 'name = "polyglot-demo"', 'version = "0.1.0"', '[dependencies]', 'serde = "1.0.219"'].join('\n'),
+        'utf8',
+      );
+      writeFileSync(join(dir, 'requirements.txt'), 'numpy==2.2.4\nfastapi>=0.115.0\n', 'utf8');
+      mkdirSync(join(dir, 'services', 'api'), { recursive: true });
+      writeFileSync(join(dir, 'go.mod'), 'module example.com/polyglot\n\ngo 1.24\n', 'utf8');
+      writeFileSync(
+        join(dir, 'max-version-lock.json'),
+        JSON.stringify({
+          schema: 'awesome-os.max-version-lock.v1',
+          libraries: [
+            { name: 'openssl', maxVersion: '4.1.0' },
+            { name: 'zstd', maxVersion: '1.5.7' },
+          ],
+        }),
+        'utf8',
+      );
+
+      const res = runLockCompat({ cwd: dir, ecosystem: 'all', outDir: 'dist/locks' });
+      assert.equal(res.ok, true);
+      assert.equal(res.ecosystem, 'all');
+      assert.deepEqual(res.ecosystemsGenerated, ['npm', 'cargo', 'uv', 'go', 'vcpkg', 'winget', 'apt']);
+      assert.equal(res.written, true);
+
+      const outBase = join(dir, 'dist', 'locks');
+
+      // 1. npm
+      const npmLock = JSON.parse(readFileSync(join(outBase, 'package-lock.json'), 'utf8')) as {
+        lockfileVersion: number;
+      };
+      assert.equal(npmLock.lockfileVersion, 3);
+
+      // 2. cargo
+      const cargoCfg = readFileSync(join(outBase, '.cargo', 'config.toml'), 'utf8');
+      assert.match(cargoCfg, /\[source\.crates-io\]/);
+      assert.match(cargoCfg, /replace-with = "holo-v11"/);
+      const cargoCompat = JSON.parse(readFileSync(join(outBase, 'holo-cargo-compat.json'), 'utf8')) as {
+        crates: Array<{ name: string; version: string }>;
+      };
+      assert.equal(cargoCompat.crates[0].name, 'serde');
+      assert.equal(cargoCompat.crates[0].version, '1.0.219');
+
+      // 3. uv
+      const uvToml = readFileSync(join(outBase, 'uv.toml'), 'utf8');
+      assert.match(uvToml, /link-mode = "hardlink"/);
+      assert.match(uvToml, /cache-dir =/);
+      const reqTxt = readFileSync(join(outBase, 'requirements.holo-v11.txt'), 'utf8');
+      assert.match(reqTxt, /fastapi==0\.115\.0/);
+      assert.match(reqTxt, /numpy==2\.2\.4/);
+
+      // 4. go
+      const goWork = readFileSync(join(outBase, 'go.work'), 'utf8');
+      assert.match(goWork, /^go 1\.24$/m);
+      assert.match(goWork, /GOPROXY=file:\/\/\/var\/lib\/b8g\/cas\/v11\/go-proxy,direct/);
+      assert.match(goWork, /\t\./);
+
+      // 5. vcpkg + pkg-config stubs for openssl, pixman, cairo, harfbuzz, zstd, libxml2
+      const vcpkgCfg = JSON.parse(readFileSync(join(outBase, 'vcpkg-configuration.json'), 'utf8')) as {
+        holoCasStore: string;
+        pinnedLibraries: Record<string, { version: string; pkgConfig: string }>;
+      };
+      assert.equal(vcpkgCfg.holoCasStore, 'v11');
+      for (const lib of ['openssl', 'pixman', 'cairo', 'harfbuzz', 'zstd', 'libxml2']) {
+        assert.ok(vcpkgCfg.pinnedLibraries[lib], `missing vcpkg lib ${lib}`);
+        const pcFile = join(outBase, vcpkgCfg.pinnedLibraries[lib].pkgConfig);
+        assert.equal(existsSync(pcFile), true, `missing .pc stub for ${lib}`);
+        assert.match(readFileSync(pcFile, 'utf8'), /X-Holo-CAS-Store: v11/);
+      }
+      assert.equal(vcpkgCfg.pinnedLibraries.openssl.version, '4.1.0');
+
+      // 6. winget (zero-UAC HKCU portable ARP, 0 MSI installers)
+      const wingetImport = JSON.parse(readFileSync(join(outBase, 'winget-import.holo-v11.json'), 'utf8')) as {
+        msiInstallerCount: number;
+        uacElevationRequired: boolean;
+      };
+      assert.equal(wingetImport.msiInstallerCount, 0);
+      assert.equal(wingetImport.uacElevationRequired, false);
+      const hkcuArp = JSON.parse(readFileSync(join(outBase, 'winget-hkcu-arp.holo-v11.json'), 'utf8')) as {
+        hive: string;
+        uacElevationRequired: boolean;
+        msiInstallerCount: number;
+        entries: Array<{ InstallerType: string; registryKey: string }>;
+      };
+      assert.equal(hkcuArp.hive, 'HKEY_CURRENT_USER');
+      assert.equal(hkcuArp.uacElevationRequired, false);
+      assert.equal(hkcuArp.msiInstallerCount, 0);
+      assert.ok(hkcuArp.entries.every((e) => e.InstallerType === 'portable' && e.registryKey.startsWith('HKCU\\')));
+
+      // 7. apt (Status: install ok installed virtual-provides gated by mandatory ELF soname)
+      const dpkgStatus = readFileSync(join(outBase, 'dpkg-status.holo-v11'), 'utf8');
+      assert.match(dpkgStatus, /Status: install ok installed/);
+      assert.match(dpkgStatus, /Provides: .*holo-v11-openssl/);
+      assert.match(dpkgStatus, /X-Holo-ELF-SONAME: libssl\.so\.3/);
+
+      // Zero mutation of host node_modules or root package-lock.json
+      assert.equal(readFileSync(join(dir, 'node_modules', '.sentinel', 'keep.txt'), 'utf8'), 'untouched');
+      assert.equal(existsSync(join(dir, 'package-lock.json')), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects apt lock-compat stanzas missing a valid mandatory ELF soname', () => {
+    const dir = makeTempDir('holo-ci-apt-soname-');
+    try {
+      assert.throws(
+        () =>
+          runLockCompat({
+            cwd: dir,
+            ecosystem: 'apt',
+            dryRun: true,
+            aptStanzas: [{ package: 'libbroken', version: '1.0.0', soname: '' }],
+          }),
+        /mandatory ELF soname/i,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('holo-ci CLI', () => {
@@ -484,6 +616,8 @@ describe('holo-ci CLI', () => {
     assert.match(helpRes.stdout, /maintain/);
     assert.match(helpRes.stdout, /init/);
     assert.match(helpRes.stdout, /lock-compat/);
+    assert.match(helpRes.stdout, /--ecosystem/);
+    assert.match(helpRes.stdout, /--out-dir/);
 
     const dir = makeTempDir();
     try {
@@ -559,6 +693,50 @@ describe('holo-ci CLI', () => {
       assert.equal(receipt.lockCompat?.written, false);
       assert.equal(existsSync(join(dir, 'package-lock.json')), false);
       assert.equal(existsSync(join(dir, 'node_modules')), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('executes lock-compat --ecosystem all --out-dir dist/eco --json via CLI', () => {
+    const cliPath = join(HERE, 'cli.mts');
+    const dir = makeTempDir('holo-ci-cli-7eco-');
+    try {
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({ name: 'cli-7eco-demo', version: '1.0.0', dependencies: { zod: '^3.25.0' } }),
+        'utf8',
+      );
+      const res = spawnSync(
+        process.execPath,
+        [cliPath, 'lock-compat', '--ecosystem', 'all', '--cwd', dir, '--out-dir', 'dist/eco', '--json'],
+        { encoding: 'utf8' },
+      );
+      assert.equal(res.status, 0, res.stderr);
+      const receipt = JSON.parse(res.stdout) as {
+        schema: string;
+        ok: boolean;
+        lockCompat?: {
+          ecosystem: string;
+          ecosystemsGenerated: string[];
+          artifacts: Array<{ ecosystem: string; relPath: string }>;
+        };
+      };
+      assert.equal(receipt.schema, HOLO_CI_RECEIPT_SCHEMA);
+      assert.equal(receipt.ok, true);
+      assert.equal(receipt.lockCompat?.ecosystem, 'all');
+      assert.equal(receipt.lockCompat?.ecosystemsGenerated.length, 7);
+      assert.ok((receipt.lockCompat?.artifacts.length ?? 0) >= 14);
+      assert.equal(existsSync(join(dir, 'dist', 'eco', 'dpkg-status.holo-v11')), true);
+      assert.equal(existsSync(join(dir, 'dist', 'eco', 'go.work')), true);
+
+      const badRes = spawnSync(
+        process.execPath,
+        [cliPath, 'lock-compat', '--ecosystem', 'bogus', '--cwd', dir],
+        { encoding: 'utf8' },
+      );
+      assert.equal(badRes.status, 1);
+      assert.match(badRes.stderr, /Unknown ecosystem/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

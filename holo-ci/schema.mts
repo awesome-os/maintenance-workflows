@@ -215,11 +215,35 @@ export interface HoloCiLockfileV3 {
   packages: Record<string, HoloCiLockCompatPackageEntry>;
 }
 
+export type HoloCiLockCompatEcosystem =
+  | 'all'
+  | 'npm'
+  | 'cargo'
+  | 'uv'
+  | 'go'
+  | 'vcpkg'
+  | 'winget'
+  | 'apt';
+
+export type HoloCiLockCompatSingleEcosystem = Exclude<HoloCiLockCompatEcosystem, 'all'>;
+
+export interface HoloCiLockCompatArtifact {
+  ecosystem: HoloCiLockCompatSingleEcosystem;
+  path: string;
+  relPath: string;
+  bytes: number;
+  sha256: string;
+  written: boolean;
+}
+
 export interface HoloCiLockCompatResult {
   ok: boolean;
+  ecosystem: HoloCiLockCompatEcosystem;
+  ecosystemsGenerated: HoloCiLockCompatSingleEcosystem[];
   name: string;
   version: string;
   outFile: string;
+  outDir: string;
   dryRun: boolean;
   written: boolean;
   lockfileVersion: 3;
@@ -230,7 +254,8 @@ export interface HoloCiLockCompatResult {
   resolvedFromPnpmLock: number;
   resolvedFromMaxLock: number;
   sha256: string;
-  lockfile: HoloCiLockfileV3;
+  artifacts: HoloCiLockCompatArtifact[];
+  lockfile?: HoloCiLockfileV3;
 }
 
 export interface HoloCiReceipt {
