@@ -34,6 +34,7 @@ export interface HoloCiUpstreamPin {
   name: string;
   pinned: string;
   upstream: string;
+  upstreamRepo?: string;
 }
 
 export interface HoloCiCasReleaseConfig {
@@ -144,6 +145,9 @@ export interface HoloCiBumpResult {
   ok: boolean;
   pins: HoloCiPinCheckResult[];
   packageBump?: HoloCiPackageBumpResult;
+  bumpedCount?: number;
+  bumpedPins?: string[];
+  applied?: boolean;
 }
 
 export interface HoloCiPackEntry {
@@ -169,6 +173,8 @@ export interface HoloCiPackResult {
   sumsPath: string;
   entries: HoloCiPackEntry[];
   dedup: HoloCiPackDedupStats;
+  casRoot?: string;
+  casWrittenFiles?: number;
 }
 
 export interface HoloCiEndpointResult {

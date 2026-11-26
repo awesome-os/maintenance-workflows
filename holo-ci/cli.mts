@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runBump } from './bump.mts';
+import { runBumpAsync } from './bump.mts';
 import { runLockCompat } from './lock-compat.mts';
 import { runMaintain } from './maintain.mts';
 import { runPack } from './pack.mts';
@@ -29,6 +29,9 @@ export interface ParsedCliArgs {
   version?: string;
   packagePath?: string;
   dryRun: boolean;
+  fetchUpstream: boolean;
+  applyPins: boolean;
+  casDir?: string;
   outDir?: string;
   outFile?: string;
   ecosystem?: HoloCiLockCompatEcosystem;
@@ -94,6 +97,9 @@ export function getHelpText(): string {
     '  --json                 Print receipt JSON to stdout',
     '  --version <X.Y.Z>      Target semver for `bump`',
     '  --package <path>       Path to package.json for `bump` (default: package.json)',
+    '  --fetch-upstream       Resolve latest upstream versions from GitHub for pins with upstreamRepo',
+    '  --apply-pins           Update lagged upstreamPins in holo-ci.json during `bump`',
+    '  --cas-dir <dir>        Materialize CAS v11 content-addressed blobs during `pack`',
     '  --dry-run              Preview `bump` or `lock-compat` without writing files',
     '  --out <path>           Output directory for `pack` or output lockfile for `lock-compat` (default: package-lock.json)',
     '  --out-dir <dir>        Output directory for `lock-compat` projections (or `pack`)',
@@ -120,6 +126,9 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
   let version: string | undefined;
   let packagePath: string | undefined;
   let dryRun = false;
+  let fetchUpstream = false;
+  let applyPins = false;
+  let casDir: string | undefined;
   let outDir: string | undefined;
   let outFile: string | undefined;
   let ecosystem: HoloCiLockCompatEcosystem | undefined;
@@ -149,6 +158,12 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
       packagePath = argv[++i];
     } else if (arg === '--dry-run') {
       dryRun = true;
+    } else if (arg === '--fetch-upstream') {
+      fetchUpstream = true;
+    } else if (arg === '--apply-pins') {
+      applyPins = true;
+    } else if (arg === '--cas-dir' && argv[i + 1]) {
+      casDir = argv[++i];
     } else if (arg === '--out' && argv[i + 1]) {
       outFile = argv[++i];
     } else if (arg === '--out-dir' && argv[i + 1]) {
@@ -194,6 +209,9 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     ...(version ? { version } : {}),
     ...(packagePath ? { packagePath } : {}),
     dryRun,
+    fetchUpstream,
+    applyPins,
+    ...(casDir ? { casDir } : {}),
     ...(outDir ? { outDir } : {}),
     ...(outFile ? { outFile } : {}),
     ...(ecosystem ? { ecosystem } : {}),
@@ -308,11 +326,14 @@ export async function executeCli(argv: string[]): Promise<{ exitCode: number; re
         sync,
       });
     } else if (opts.phase === 'bump') {
-      const bump = runBump(manifest, {
+      const bump = await runBumpAsync(manifest, {
         cwd: opts.cwd,
         version: opts.version,
         packagePath: opts.packagePath,
         dryRun: opts.dryRun,
+        fetchUpstream: opts.fetchUpstream,
+        applyPins: opts.applyPins,
+        configPath: opts.configPath,
       });
       receipt = buildReceipt({
         manifest,
@@ -325,6 +346,7 @@ export async function executeCli(argv: string[]): Promise<{ exitCode: number; re
       const pack = runPack(manifest, {
         cwd: opts.cwd,
         outDir: opts.outDir ?? opts.outFile,
+        casDir: opts.casDir,
       });
       receipt = buildReceipt({
         manifest,

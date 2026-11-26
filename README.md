@@ -24,7 +24,10 @@ jobs:
       phase: verify
       working-directory: '.'
       holo-ci-ref: v1
+      extra-args: ''
 ```
+
+When invoking `reusable-holo-ci.yml@v1` for `bump` (for example with `extra-args: '--fetch-upstream --apply-pins'`), the job exposes `outputs.bumped` (`'true'` when `bump?.bumpedCount > 0 || bump?.packageBump?.updated` in `holo-ci-receipt.ndjson`, otherwise `'false'`) so downstream build, `pack`, and release jobs can trigger conditionally when fresh upstream versions appear.
 
 #### `holo-ci` CLI Subcommands
 
@@ -34,14 +37,14 @@ Run directly via native Node 24/26 (`node holo-ci/cli.mts <phase> [options]`):
 | :--- | :--- |
 | `verify` | Executes declared `tests` and `nativeGates`, verifies `docs`, and scans workflows/manifests for `zeroGhost`, `zeroCasV1`, and `zeroHttpIpc` violations. |
 | `sync` | Recursively compares SHA-256 hashes across `syncPairs` and audits active git working-tree status. |
-| `bump` | Validates semver upstream pins (`pinned >= upstream`) and bumps `package.json` (`--version X.Y.Z`, `--dry-run`). |
-| `pack` | Generates deterministic `holo-v11-manifest.json` (`0x33564742`) and `SHA512SUMS.txt` with byte-level dedup telemetry. |
+| `bump` | Validates semver upstream pins (`pinned >= upstream`), optionally fetches live GitHub upstream versions (`--fetch-upstream`), updates lagged pins in `holo-ci.json` (`--apply-pins`), and bumps `package.json` (`--version X.Y.Z`, `--dry-run`). |
+| `pack` | Generates deterministic `holo-v11-manifest.json` (`0x33564742`) and `SHA512SUMS.txt` with byte-level dedup telemetry, and optionally materializes `<cas-dir>/v11/files/<aa>/<sha512>` CAS blobs (`--cas-dir <dir>`). |
 | `telemetry` | Emits `holo-ci.receipt.v1` JSON/NDJSON (`--receipt`) and appends Markdown summaries to `$GITHUB_STEP_SUMMARY` (`--emit-summary`). |
 | `maintain` | Performs zero-checkout clean-box HTTP `200`, SHA-512, and Ed25519 signature verification (`node:crypto`). |
 | `init` | Scaffolds a starter `holo-ci.json` manifest in the target directory. |
 | `lock-compat` | Synthesizes zero-copy `v11` CAS lock & metadata projections across 9 ecosystems (`npm`, `cargo`, `uv`, `go`, `vcpkg`, `winget`, `apt`, `composer`, `rubygems`, or `all`; aliases: `php`, `ruby`, `bundler`) into `--out-dir` without mutating `node_modules` or host package stores. |
 
-Common flags: `--config <path>`, `--receipt <path>`, `--emit-summary`, `--json`, `--cwd <dir>`, `--out <path>`, `--out-dir <dir>`, `--ecosystem <all|npm|cargo|uv|go|vcpkg|winget|apt|composer|rubygems>`, `--dry-run`, `--max-lock <path>`, `--help`.
+Common flags: `--config <path>`, `--receipt <path>`, `--emit-summary`, `--json`, `--cwd <dir>`, `--fetch-upstream`, `--apply-pins`, `--cas-dir <dir>`, `--out <path>`, `--out-dir <dir>`, `--ecosystem <all|npm|cargo|uv|go|vcpkg|winget|apt|composer|rubygems>`, `--dry-run`, `--max-lock <path>`, `--help`.
 
 ### Zero-Migration Strangler-Fig Hybrid Workspace Pattern (`holo-ci lock-compat`)
 

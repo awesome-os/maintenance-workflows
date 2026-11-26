@@ -28,6 +28,15 @@ on:
         required: false
         default: 'v1'
         type: string
+      extra-args:
+        description: 'Optional extra CLI arguments passed to holo-ci/cli.mts'
+        required: false
+        default: ''
+        type: string
+    outputs:
+      bumped:
+        description: 'Whether any upstream pin or package version was bumped'
+        value: ${{ jobs.holo-ci.outputs.bumped }}
 
 permissions:
   contents: read
@@ -36,6 +45,8 @@ jobs:
   holo-ci:
     name: Holo-CI (${{ inputs.phase }})
     runs-on: ubuntu-latest
+    outputs:
+      bumped: ${{ steps.run-holo-ci.outputs.bumped }}
     steps:
       - name: Checkout caller repository
         uses: actions/checkout@v4
@@ -53,12 +64,43 @@ jobs:
           node-version: ${{ inputs.node-version }}
 
       - name: Run holo-ci (${{ inputs.phase }})
+        id: run-holo-ci
         working-directory: ${{ inputs.working-directory }}
+        env:
+          HOLO_CI_EXTRA_ARGS: ${{ inputs.extra-args }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
+          EXTRA_ARGS=()
+          if [ -n "${HOLO_CI_EXTRA_ARGS:-}" ]; then
+            read -r -a EXTRA_ARGS <<< "${HOLO_CI_EXTRA_ARGS}"
+          fi
+          set +e
           node "${{ github.workspace }}/.holo-ci-runtime/holo-ci/cli.mts" "${{ inputs.phase }}" \
             --config "${{ inputs.config-path }}" \
             --emit-summary \
-            --receipt "${{ github.workspace }}/holo-ci-receipt.ndjson"
+            --receipt "${{ github.workspace }}/holo-ci-receipt.ndjson" \
+            "${EXTRA_ARGS[@]}"
+          CLI_EXIT=$?
+          set -e
+          BUMPED=$(node -e '
+            const fs = require("node:fs");
+            const file = process.argv[1];
+            let bumped = false;
+            if (fs.existsSync(file)) {
+              const lines = fs.readFileSync(file, "utf8").trim().split(/\r?\n/).filter(Boolean);
+              for (const line of lines) {
+                try {
+                  const r = JSON.parse(line);
+                  if ((r.bump && r.bump.bumpedCount > 0) || (r.bump && r.bump.packageBump && r.bump.packageBump.updated)) {
+                    bumped = true;
+                  }
+                } catch {}
+              }
+            }
+            process.stdout.write(bumped ? "true" : "false");
+          ' "${{ github.workspace }}/holo-ci-receipt.ndjson")
+          echo "bumped=${BUMPED}" >> "${GITHUB_OUTPUT}"
+          exit "${CLI_EXIT}"
 
       - name: Upload holo-ci receipt
         if: always()

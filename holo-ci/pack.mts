@@ -1,5 +1,15 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import {
   B8G_ABI_MAGIC_V3,
@@ -107,7 +117,7 @@ export function computeDedupStats(entries: HoloCiPackEntry[]): HoloCiPackDedupSt
 
 export function runPack(
   manifest: HoloCiManifest,
-  options: { cwd?: string; outDir?: string; include?: string[]; exclude?: string[] } = {},
+  options: { cwd?: string; outDir?: string; include?: string[]; exclude?: string[]; casDir?: string } = {},
 ): HoloCiPackResult {
   const cwd = options.cwd ?? process.cwd();
   const casCfg = manifest.casRelease ?? {};
@@ -122,9 +132,53 @@ export function runPack(
     options.exclude ?? casCfg.exclude,
   );
 
+  const casRoot = options.casDir ? resolve(cwd, options.casDir) : undefined;
+  let casWrittenFiles = 0;
+
   const entries: HoloCiPackEntry[] = files.map((filePath) => {
     const relPath = relative(cwd, filePath).replace(/\\/g, '/');
     const { sha512, size } = hashSha512File(filePath);
+
+    if (casRoot) {
+      const shard = sha512.slice(0, 2);
+      const blobDir = join(casRoot, 'v11', 'files', shard);
+      const blobPath = join(blobDir, sha512);
+      if (existsSync(blobPath)) {
+        const existing = hashSha512File(blobPath);
+        if (existing.sha512 !== sha512) {
+          throw new Error(`CAS blob SHA-512 mismatch at ${blobPath}`);
+        }
+      } else {
+        mkdirSync(blobDir, { recursive: true });
+        const tmpPath = join(blobDir, `.${sha512}.${process.pid}.${Date.now()}.tmp`);
+        const buf = readFileSync(filePath);
+        writeFileSync(tmpPath, buf);
+        try {
+          if (process.platform !== 'win32') {
+            const srcMode = statSync(filePath).mode & 0o777;
+            if ((srcMode & 0o111) !== 0) {
+              chmodSync(tmpPath, srcMode);
+            }
+          }
+          const verified = hashSha512File(tmpPath);
+          if (verified.sha512 !== sha512) {
+            throw new Error(`CAS write SHA-512 verification failed for ${relPath}`);
+          }
+          renameSync(tmpPath, blobPath);
+          casWrittenFiles++;
+        } catch (err) {
+          if (existsSync(tmpPath)) {
+            try {
+              unlinkSync(tmpPath);
+            } catch {
+              // ignore cleanup failure
+            }
+          }
+          throw err;
+        }
+      }
+    }
+
     return { path: relPath, size, sha512 };
   });
 
@@ -153,5 +207,6 @@ export function runPack(
     sumsPath,
     entries,
     dedup,
+    ...(casRoot !== undefined ? { casRoot, casWrittenFiles } : {}),
   };
 }

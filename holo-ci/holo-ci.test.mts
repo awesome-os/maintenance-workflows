@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { runBump } from './bump.mts';
+import { fetchLatestUpstreamVersion, runBump, runBumpAsync } from './bump.mts';
 import { runLockCompat } from './lock-compat.mts';
 import { runMaintain, verifyBundleManifest } from './maintain.mts';
 import { runPack } from './pack.mts';
@@ -184,6 +184,151 @@ describe('holo-ci bump', () => {
       );
       assert.equal(behind.ok, false);
       assert.equal(behind.pins[0].status, 'pinned-behind');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fetchLatestUpstreamVersion normalizes GitHub release/tag formats and falls back to /tags', async () => {
+    const mockTagsFetch = (async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/releases/latest')) {
+        return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 });
+      }
+      if (url.includes('/tags?per_page=20')) {
+        return new Response(
+          JSON.stringify([
+            { name: 'curl-8_23_0' },
+            { name: 'VER-2-15-0' },
+            { name: 'openssl-4.1.0' },
+            { name: 'v1.6.59' },
+          ]),
+          { status: 200 },
+        );
+      }
+      return new Response('unexpected', { status: 500 });
+    }) as typeof fetch;
+
+    const releaseFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      assert.equal(headers.Authorization, 'Bearer test-tok');
+      return new Response(JSON.stringify({ tag_name: 'openssl-4.1.0', draft: false, prerelease: false }), {
+        status: 200,
+      });
+    }) as typeof fetch;
+
+    const rel = await fetchLatestUpstreamVersion('openssl/openssl', 'test-tok', releaseFetch);
+    assert.deepEqual(rel, { tag: 'openssl-4.1.0', version: '4.1.0' });
+
+    const singleTagCases: Array<[string, string]> = [
+      ['v1.2.3', '1.2.3'],
+      ['openssl-4.1.0', '4.1.0'],
+      ['VER-2-15-0', '2.15.0'],
+      ['curl-8_23_0', '8.23.0'],
+    ];
+    for (const [tag, expectedVersion] of singleTagCases) {
+      const tagOnlyFetch = (async (input: string | URL | Request) => {
+        if (String(input).endsWith('/releases/latest')) {
+          return new Response('', { status: 404 });
+        }
+        return new Response(JSON.stringify([{ name: tag }]), { status: 200 });
+      }) as typeof fetch;
+      const got = await fetchLatestUpstreamVersion('awesome-os/demo', 'tok', tagOnlyFetch);
+      assert.deepEqual(got, { tag, version: expectedVersion });
+    }
+
+    const multiTag = await fetchLatestUpstreamVersion('curl/curl', 'tok', mockTagsFetch);
+    assert.equal(multiTag?.version, '8.23.0');
+  });
+
+  it('closes upstream-bump -> v11 CAS loop: runBumpAsync bumps lagged pin and runPack materializes SHA-512 blob', async () => {
+    const dir = makeTempDir('holo-ci-bump-cas-');
+    try {
+      const configPath = join(dir, 'holo-ci.json');
+      const initialManifest: HoloCiManifest = {
+        schema: HOLO_CI_SCHEMA,
+        name: 'libpng-cas-loop',
+        kind: 'native-fork',
+        upstreamPins: [
+          {
+            name: 'libpng',
+            pinned: '1.6.58',
+            upstream: '1.6.58',
+            upstreamRepo: 'pnggroup/libpng',
+          },
+        ],
+        casRelease: {
+          outDir: 'dist',
+          include: ['assets'],
+        },
+      };
+      writeFileSync(configPath, `${JSON.stringify(initialManifest, null, 2)}\n`, 'utf8');
+
+      mkdirSync(join(dir, 'assets'), { recursive: true });
+      const payload = Buffer.from('holo-v11-libpng-1.6.59-artifact\n', 'utf8');
+      const expectedSha512 = createHash('sha512').update(payload).digest('hex');
+      writeFileSync(join(dir, 'assets', 'libpng.bin'), payload);
+
+      const mockFetch = (async (input: string | URL | Request) => {
+        if (String(input).endsWith('/releases/latest')) {
+          return new Response(JSON.stringify({ tag_name: 'v1.6.59', draft: false, prerelease: false }), {
+            status: 200,
+          });
+        }
+        return new Response('', { status: 404 });
+      }) as typeof fetch;
+
+      // 1. Without applyPins: detects unbumped drift (ok === false)
+      const driftRes = await runBumpAsync(initialManifest, {
+        cwd: dir,
+        fetchUpstream: true,
+        applyPins: false,
+        fetchFn: mockFetch,
+      });
+      assert.equal(driftRes.ok, false);
+      assert.equal(driftRes.bumpedCount, 1);
+      assert.deepEqual(driftRes.bumpedPins, ['libpng']);
+      assert.equal(driftRes.applied, false);
+      assert.equal(driftRes.pins[0].status, 'pinned-behind');
+      assert.equal(driftRes.pins[0].pinned, '1.6.58');
+      assert.equal(driftRes.pins[0].upstream, '1.6.59');
+
+      // 2. With applyPins: updates holo-ci.json and refreshes pin status to pinned-match
+      const appliedRes = await runBumpAsync(initialManifest, {
+        cwd: dir,
+        fetchUpstream: true,
+        applyPins: true,
+        configPath: 'holo-ci.json',
+        fetchFn: mockFetch,
+      });
+      assert.equal(appliedRes.ok, true);
+      assert.equal(appliedRes.bumpedCount, 1);
+      assert.deepEqual(appliedRes.bumpedPins, ['libpng']);
+      assert.equal(appliedRes.applied, true);
+      assert.equal(appliedRes.pins[0].status, 'pinned-match');
+      assert.equal(appliedRes.pins[0].pinned, '1.6.59');
+      assert.equal(appliedRes.pins[0].upstream, '1.6.59');
+
+      const persisted = JSON.parse(readFileSync(configPath, 'utf8')) as HoloCiManifest;
+      assert.equal(persisted.upstreamPins?.[0].pinned, '1.6.59');
+      assert.equal(persisted.upstreamPins?.[0].upstream, '1.6.59');
+
+      // 3. Materialize v11 CAS blob and verify bit-for-bit SHA-512
+      const casDir = join(dir, 'cas-store');
+      const packRes = runPack(persisted, { cwd: dir, casDir });
+      assert.equal(packRes.ok, true);
+      assert.equal(packRes.casRoot, casDir);
+      assert.equal(packRes.casWrittenFiles, 1);
+
+      const blobPath = join(casDir, 'v11', 'files', expectedSha512.slice(0, 2), expectedSha512);
+      assert.equal(existsSync(blobPath), true);
+      const blobBuf = readFileSync(blobPath);
+      assert.deepEqual(blobBuf, payload);
+      assert.equal(createHash('sha512').update(blobBuf).digest('hex'), expectedSha512);
+
+      // Re-packing into the same casDir should deduplicate (0 new files written)
+      const secondPack = runPack(persisted, { cwd: dir, casDir });
+      assert.equal(secondPack.casWrittenFiles, 0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -997,6 +1142,71 @@ describe('holo-ci CLI', () => {
       );
       assert.equal(badRes.status, 1);
       assert.match(badRes.stderr, /Unknown ecosystem/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('executes bump --apply-pins and pack --cas-dir via CLI with receipt fields', () => {
+    const cliPath = join(HERE, 'cli.mts');
+    const dir = makeTempDir('holo-ci-cli-bump-pack-');
+    try {
+      mkdirSync(join(dir, 'assets'), { recursive: true });
+      const data = Buffer.from('cli-cas-v11-blob-content', 'utf8');
+      const expectedSha512 = createHash('sha512').update(data).digest('hex');
+      writeFileSync(join(dir, 'assets', 'artifact.bin'), data);
+      writeFileSync(
+        join(dir, 'holo-ci.json'),
+        JSON.stringify(
+          {
+            schema: HOLO_CI_SCHEMA,
+            name: 'cli-bump-pack',
+            kind: 'app',
+            upstreamPins: [{ name: 'libpng', pinned: '1.6.58', upstream: '1.6.59' }],
+            casRelease: { outDir: 'dist', include: ['assets'] },
+          },
+          null,
+          2,
+        ),
+        'utf8',
+      );
+
+      const bumpRes = spawnSync(
+        process.execPath,
+        [cliPath, 'bump', '--cwd', dir, '--apply-pins', '--json'],
+        { encoding: 'utf8' },
+      );
+      assert.equal(bumpRes.status, 0, bumpRes.stderr);
+      const bumpReceipt = JSON.parse(bumpRes.stdout) as {
+        schema: string;
+        ok: boolean;
+        bump?: { bumpedCount?: number; bumpedPins?: string[]; applied?: boolean };
+      };
+      assert.equal(bumpReceipt.schema, HOLO_CI_RECEIPT_SCHEMA);
+      assert.equal(bumpReceipt.ok, true);
+      assert.equal(bumpReceipt.bump?.bumpedCount, 1);
+      assert.deepEqual(bumpReceipt.bump?.bumpedPins, ['libpng']);
+      assert.equal(bumpReceipt.bump?.applied, true);
+
+      const packRes = spawnSync(
+        process.execPath,
+        [cliPath, 'pack', '--cwd', dir, '--cas-dir', 'cas-out', '--json'],
+        { encoding: 'utf8' },
+      );
+      assert.equal(packRes.status, 0, packRes.stderr);
+      const packReceipt = JSON.parse(packRes.stdout) as {
+        schema: string;
+        ok: boolean;
+        pack?: { casRoot?: string; casWrittenFiles?: number };
+      };
+      assert.equal(packReceipt.schema, HOLO_CI_RECEIPT_SCHEMA);
+      assert.equal(packReceipt.ok, true);
+      assert.equal(packReceipt.pack?.casRoot, join(dir, 'cas-out'));
+      assert.equal(packReceipt.pack?.casWrittenFiles, 1);
+      assert.equal(
+        existsSync(join(dir, 'cas-out', 'v11', 'files', expectedSha512.slice(0, 2), expectedSha512)),
+        true,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
