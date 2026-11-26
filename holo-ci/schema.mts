@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 export const HOLO_CI_SCHEMA = 'holo-ci.v1' as const;
 export const HOLO_CI_RECEIPT_SCHEMA = 'holo-ci.receipt.v1' as const;
 export const HOLO_V11_MANIFEST_SCHEMA = 'holo-v11.manifest.v1' as const;
+export const HOLO_BOUNDARY_SCHEMA = 'holo-boundary.v1' as const;
 export const B8G_ABI_MAGIC_V3 = '0x33564742' as const;
 
 export type HoloCiKind = 'monorepo' | 'native-fork' | 'control-plane' | 'app';
@@ -15,7 +16,8 @@ export type HoloCiPhase =
   | 'telemetry'
   | 'maintain'
   | 'init'
-  | 'lock-compat';
+  | 'lock-compat'
+  | 'boundary-audit';
 
 export interface HoloCiGuards {
   zeroGhost?: boolean;
@@ -269,6 +271,53 @@ export interface HoloCiLockCompatResult {
   lockfile?: HoloCiLockfileV3;
 }
 
+export type HoloBoundaryPlane = 1 | 2 | 3 | 4 | 5;
+
+export interface HoloBoundaryManifest {
+  schema: 'holo-boundary.v1';
+  plane?: HoloBoundaryPlane;
+  publicEntrypoints?: string[];
+  allowedImports?: string[];
+  forbiddenImports?: string[];
+  maxParentTraversals?: number;
+  scanSourceHttpIpc?: boolean;
+  abiGoldenFiles?: string[];
+}
+
+export type HoloCiBoundaryRule =
+  | 'boundaryManifest'
+  | 'forbiddenImport'
+  | 'parentTraversal'
+  | 'httpIpc'
+  | 'abiGolden';
+
+export interface HoloCiBoundaryViolation {
+  rule: HoloCiBoundaryRule;
+  file: string;
+  line: number;
+  snippet: string;
+  message: string;
+}
+
+export interface HoloCiBoundaryAxes {
+  dependencyPurity: number;
+  encapsulation: number;
+  ipcCompliance: number;
+  abiContract: number;
+  governance: number;
+}
+
+export interface HoloCiBoundaryResult {
+  ok: boolean;
+  score: number;
+  manifestFound: boolean;
+  boundaryPath?: string;
+  plane?: HoloBoundaryPlane;
+  scannedFiles: number;
+  axes: HoloCiBoundaryAxes;
+  violations: HoloCiBoundaryViolation[];
+}
+
 export interface HoloCiReceipt {
   schema: 'holo-ci.receipt.v1';
   abiMagic: '0x33564742';
@@ -284,6 +333,7 @@ export interface HoloCiReceipt {
   pack?: HoloCiPackResult;
   maintain?: HoloCiMaintainResult;
   lockCompat?: HoloCiLockCompatResult;
+  boundaryAudit?: HoloCiBoundaryResult;
   errors?: string[];
 }
 

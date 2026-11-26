@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { HOLO_BOUNDARY_SCHEMA, runBoundaryAudit, type HoloBoundaryManifest } from './boundary.mts';
 import { fetchLatestUpstreamVersion, runBump, runBumpAsync } from './bump.mts';
 import { runLockCompat } from './lock-compat.mts';
 import { runMaintain, verifyBundleManifest } from './maintain.mts';
@@ -1376,6 +1377,278 @@ describe('holo-ci CLI', () => {
         existsSync(join(dir, 'cas-out', 'v11', 'files', expectedSha512.slice(0, 2), expectedSha512)),
         true,
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('executes boundary-audit --json end-to-end (pass and fail)', () => {
+    const cliPath = join(HERE, 'cli.mts');
+    const dir = makeTempDir('holo-ci-cli-boundary-');
+    try {
+      mkdirSync(join(dir, 'src'), { recursive: true });
+      writeFileSync(join(dir, 'src', 'index.mts'), 'export const ok = true;\n', 'utf8');
+      writeFileSync(
+        join(dir, 'custom-boundary.json'),
+        JSON.stringify({
+          schema: HOLO_BOUNDARY_SCHEMA,
+          plane: 2,
+          publicEntrypoints: ['src/index.mts'],
+          forbiddenImports: ['intersections/sectium-browser'],
+          maxParentTraversals: 2,
+          scanSourceHttpIpc: true,
+        }),
+        'utf8',
+      );
+
+      const passRes = spawnSync(
+        process.execPath,
+        [cliPath, 'boundary-audit', '--cwd', dir, '--boundary', 'custom-boundary.json', '--json'],
+        { encoding: 'utf8' },
+      );
+      assert.equal(passRes.status, 0, passRes.stderr);
+      const passReceipt = JSON.parse(passRes.stdout) as {
+        schema: string;
+        abiMagic: string;
+        phase: string;
+        ok: boolean;
+        boundaryAudit?: {
+          ok: boolean;
+          score: number;
+          manifestFound: boolean;
+          scannedFiles: number;
+          axes: Record<string, number>;
+          violations: unknown[];
+        };
+      };
+      assert.equal(passReceipt.schema, HOLO_CI_RECEIPT_SCHEMA);
+      assert.equal(passReceipt.abiMagic, B8G_ABI_MAGIC_V3);
+      assert.equal(passReceipt.phase, 'boundary-audit');
+      assert.equal(passReceipt.ok, true);
+      assert.equal(passReceipt.boundaryAudit?.ok, true);
+      assert.equal(passReceipt.boundaryAudit?.manifestFound, true);
+      assert.equal(passReceipt.boundaryAudit?.scannedFiles, 1);
+      assert.equal(passReceipt.boundaryAudit?.axes.dependencyPurity, 20);
+      assert.equal(passReceipt.boundaryAudit?.axes.encapsulation, 20);
+      assert.equal(passReceipt.boundaryAudit?.axes.ipcCompliance, 20);
+      assert.equal(passReceipt.boundaryAudit?.violations.length, 0);
+
+      // Inject a forbidden import and verify exit code 1 + violation in JSON receipt
+      writeFileSync(
+        join(dir, 'src', 'bad.mts'),
+        "import { boot } from 'intersections/sectium-browser/internal.mts';\nexport { boot };\n",
+        'utf8',
+      );
+      const failRes = spawnSync(
+        process.execPath,
+        [cliPath, 'boundary-audit', '--cwd', dir, '--boundary', 'custom-boundary.json', '--json'],
+        { encoding: 'utf8' },
+      );
+      assert.equal(failRes.status, 1);
+      const failReceipt = JSON.parse(failRes.stdout) as {
+        ok: boolean;
+        boundaryAudit?: {
+          ok: boolean;
+          score: number;
+          violations: Array<{ rule: string; file: string }>;
+        };
+      };
+      assert.equal(failReceipt.ok, false);
+      assert.equal(failReceipt.boundaryAudit?.ok, false);
+      assert.equal(failReceipt.boundaryAudit?.violations.length, 1);
+      assert.equal(failReceipt.boundaryAudit?.violations[0].rule, 'forbiddenImport');
+      assert.equal(failReceipt.boundaryAudit?.violations[0].file, 'src/bad.mts');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('holo-ci boundary-audit', () => {
+  it('passes clean workspace and scores 100/100 on maintenance-workflows with boundary.json', () => {
+    const repoAudit = runBoundaryAudit({ cwd: REPO_ROOT, boundaryPath: 'boundary.json' });
+    assert.equal(repoAudit.ok, true);
+    assert.equal(repoAudit.manifestFound, true);
+    assert.equal(repoAudit.score, 100);
+    assert.deepEqual(repoAudit.axes, {
+      dependencyPurity: 20,
+      encapsulation: 20,
+      ipcCompliance: 20,
+      abiContract: 20,
+      governance: 20,
+    });
+    assert.equal(repoAudit.violations.length, 0);
+
+    const dir = makeTempDir('holo-ci-boundary-clean-');
+    try {
+      mkdirSync(join(dir, 'src'), { recursive: true });
+      writeFileSync(join(dir, 'src', 'app.mts'), "import { helper } from './helper.mts';\nexport { helper };\n", 'utf8');
+      writeFileSync(join(dir, 'src', 'helper.mts'), 'export const helper = 1;\n', 'utf8');
+      const fallbackAudit = runBoundaryAudit({ cwd: dir });
+      assert.equal(fallbackAudit.ok, true);
+      assert.equal(fallbackAudit.manifestFound, false);
+      assert.equal(fallbackAudit.scannedFiles, 2);
+      assert.equal(fallbackAudit.axes.dependencyPurity, 20);
+      assert.equal(fallbackAudit.axes.encapsulation, 12);
+      assert.equal(fallbackAudit.axes.ipcCompliance, 20);
+      assert.equal(fallbackAudit.axes.abiContract, 10);
+      assert.equal(fallbackAudit.axes.governance, 0);
+      assert.equal(fallbackAudit.score, 62);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('catches forbiddenImports in JS/TS and C/C++ while honoring allowedImports', () => {
+    const dir = makeTempDir('holo-ci-boundary-forbidden-');
+    try {
+      mkdirSync(join(dir, 'src'), { recursive: true });
+      mkdirSync(join(dir, '.github'), { recursive: true });
+      writeFileSync(
+        join(dir, 'LICENSE'),
+        'Permission is hereby granted, free of charge\nTHE SOFTWARE IS PROVIDED "AS IS"\n',
+        'utf8',
+      );
+      writeFileSync(join(dir, '.gitattributes'), '* text=auto eol=lf\n', 'utf8');
+      writeFileSync(join(dir, '.github', 'CODEOWNERS'), '* @lemanschik\n', 'utf8');
+      const manifest: HoloBoundaryManifest = {
+        schema: HOLO_BOUNDARY_SCHEMA,
+        plane: 2,
+        publicEntrypoints: ['src/index.mts'],
+        allowedImports: ['intersections/sectium-browser/public.h'],
+        forbiddenImports: ['intersections/sectium-browser', '../../packages/'],
+      };
+      writeFileSync(join(dir, 'boundary.json'), JSON.stringify(manifest, null, 2), 'utf8');
+      writeFileSync(
+        join(dir, 'src', 'index.mts'),
+        [
+          "import { x } from 'intersections/sectium-browser/private.mts';",
+          "import { y } from '../../packages/secret/index.mts';",
+          'export { x, y };',
+        ].join('\n'),
+        'utf8',
+      );
+      writeFileSync(
+        join(dir, 'src', 'bridge.c'),
+        [
+          '#include "intersections/sectium-browser/public.h"',
+          '#include "intersections/sectium-browser/private.h"',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const res = runBoundaryAudit({ cwd: dir });
+      assert.equal(res.ok, false);
+      assert.equal(res.violations.length, 3);
+      assert.ok(res.violations.every((v) => v.rule === 'forbiddenImport'));
+      assert.equal(res.axes.dependencyPurity, 5);
+      assert.equal(res.score, 75);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('catches deep parent-traversal escapes (../../../../) and respects holo-ci-allow-guard', () => {
+    const dir = makeTempDir('holo-ci-boundary-traversal-');
+    try {
+      mkdirSync(join(dir, 'src', 'nested', 'deep'), { recursive: true });
+      writeFileSync(
+        join(dir, 'src', 'nested', 'deep', 'escape.mts'),
+        [
+          "import { ok3 } from '../../../within-limit.mts';",
+          "import { allow4 } from '../../../../allowlisted.mts'; // holo-ci-allow-guard",
+          "import { bad4 } from '../../../../outside-boundary.mts';",
+          'export { ok3, allow4, bad4 };',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const res = runBoundaryAudit({ cwd: dir });
+      assert.equal(res.ok, false);
+      assert.equal(res.violations.length, 1);
+      assert.equal(res.violations[0].rule, 'parentTraversal');
+      assert.equal(res.violations[0].line, 3);
+      assert.equal(res.axes.dependencyPurity, 15);
+      assert.equal(res.axes.encapsulation, 8);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('catches source-level B8G016 loopback HTTP IPC on .mts files, excludes tests, and respects holo-ci-allow-guard', () => {
+    const dir = makeTempDir('holo-ci-boundary-ipc-');
+    try {
+      mkdirSync(join(dir, 'src'), { recursive: true });
+      mkdirSync(join(dir, 'node_modules', 'pkg'), { recursive: true });
+      const badLocalhost = ['http', '://', 'localhost:3000/rpc'].join('');
+      const badLoopback = ['http', '://', '127.0.0.1:9000'].join('');
+
+      writeFileSync(
+        join(dir, 'src', 'ipc.mts'),
+        [
+          `const allowed = '${badLocalhost}'; // holo-ci-allow-guard`,
+          `export const illegalUrl = '${badLoopback}';`,
+        ].join('\n'),
+        'utf8',
+      );
+      // Test files and node_modules must be excluded from source scan
+      writeFileSync(join(dir, 'src', 'ipc.test.mts'), `const testUrl = '${badLoopback}';\n`, 'utf8');
+      writeFileSync(join(dir, 'node_modules', 'pkg', 'index.js'), `const depUrl = '${badLoopback}';\n`, 'utf8');
+
+      const res = runBoundaryAudit({ cwd: dir });
+      assert.equal(res.ok, false);
+      assert.equal(res.scannedFiles, 1);
+      assert.equal(res.violations.length, 1);
+      assert.equal(res.violations[0].rule, 'httpIpc');
+      assert.equal(res.violations[0].file, 'src/ipc.mts');
+      assert.equal(res.violations[0].line, 2);
+      assert.equal(res.axes.ipcCompliance, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('validates abiGoldenFiles and formats boundaryAudit telemetry summary', () => {
+    const dir = makeTempDir('holo-ci-boundary-abi-');
+    try {
+      mkdirSync(join(dir, 'src'), { recursive: true });
+      writeFileSync(join(dir, 'src', 'main.mts'), 'export const v = 1;\n', 'utf8');
+      writeFileSync(join(dir, 'abi-golden.json'), JSON.stringify({ abiMagic: B8G_ABI_MAGIC_V3 }), 'utf8');
+      writeFileSync(
+        join(dir, 'boundary.json'),
+        JSON.stringify({
+          schema: HOLO_BOUNDARY_SCHEMA,
+          plane: 3,
+          publicEntrypoints: ['src/main.mts'],
+          abiGoldenFiles: ['abi-golden.json'],
+        }),
+        'utf8',
+      );
+
+      const passRes = runBoundaryAudit({ cwd: dir });
+      assert.equal(passRes.ok, true);
+      assert.equal(passRes.axes.abiContract, 20);
+
+      const receipt = buildReceipt({
+        manifest: { schema: HOLO_CI_SCHEMA, name: 'abi-demo', kind: 'control-plane' },
+        phase: 'boundary-audit',
+        ok: passRes.ok,
+        durationMs: 10,
+        boundaryAudit: passRes,
+      });
+      const summaryPath = join(dir, 'summary.md');
+      emitTelemetry(receipt, { cwd: dir, emitSummary: true, summaryPath });
+      const md = readFileSync(summaryPath, 'utf8');
+      assert.match(md, /Boundary Audit/);
+      assert.match(md, /Boundary Axes/);
+      assert.match(md, /80\/100/);
+
+      // Corrupt golden file -> abiGolden violation and abiContract drops to 0
+      writeFileSync(join(dir, 'abi-golden.json'), '{not-valid-json', 'utf8');
+      const failRes = runBoundaryAudit({ cwd: dir });
+      assert.equal(failRes.ok, false);
+      assert.equal(failRes.axes.abiContract, 0);
+      assert.equal(failRes.violations[0].rule, 'abiGolden');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -1,0 +1,16 @@
+{
+  "schema": "holo-boundary.v1",
+  "plane": 1,
+  "publicEntrypoints": [
+    "holo-ci/cli.mts",
+    "holo-ci/schema.mts",
+    "holo-ci/verify.mts",
+    "holo-ci/boundary.mts"
+  ],
+  "forbiddenImports": [
+    "intersections/sectium-browser",
+    "../../packages/"
+  ],
+  "maxParentTraversals": 2,
+  "scanSourceHttpIpc": true
+}

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runBoundaryAudit } from './boundary.mts';
 import { runBumpAsync } from './bump.mts';
 import { runLockCompat } from './lock-compat.mts';
 import { runMaintain } from './maintain.mts';
@@ -22,6 +23,7 @@ export interface ParsedCliArgs {
   phase: HoloCiPhase;
   help: boolean;
   configPath: string;
+  boundaryPath?: string;
   receiptPath?: string;
   emitSummary: boolean;
   summaryFile?: string;
@@ -51,6 +53,7 @@ const VALID_PHASES = new Set<HoloCiPhase>([
   'maintain',
   'init',
   'lock-compat',
+  'boundary-audit',
 ]);
 
 const VALID_ECOSYSTEMS = new Set<HoloCiLockCompatEcosystem>([
@@ -88,9 +91,11 @@ export function getHelpText(): string {
     '  maintain     Verify clean-box HTTP 200 endpoints, SHA-512 bundles, and Ed25519 signatures',
     '  init         Scaffold a starter holo-ci.json manifest in the target directory',
     '  lock-compat  Synthesize zero-copy CAS v11 lock/metadata projections (npm|cargo|uv|go|vcpkg|winget|apt|composer|rubygems|all)',
+    '  boundary-audit  Run Chromium-style checkdeps & 0-100 architectural boundary audit (boundary.json)',
     '',
     'Options:',
     '  --config <path>        Path to holo-ci.json (default: holo-ci.json)',
+    '  --boundary <path>      Path to boundary.json for `boundary-audit` (default: boundary.json)',
     '  --receipt <path>       Write holo-ci.receipt.v1 JSON or append NDJSON line',
     '  --emit-summary         Append Markdown summary to $GITHUB_STEP_SUMMARY (or --summary-file)',
     '  --summary-file <path>  Explicit Markdown summary path override',
@@ -119,6 +124,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
   let phaseExplicit = false;
   let help = false;
   let configPath = 'holo-ci.json';
+  let boundaryPath: string | undefined;
   let receiptPath: string | undefined;
   let emitSummary = false;
   let summaryFile: string | undefined;
@@ -144,6 +150,8 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
       help = true;
     } else if (arg === '--config' && argv[i + 1]) {
       configPath = argv[++i];
+    } else if (arg === '--boundary' && argv[i + 1]) {
+      boundaryPath = argv[++i];
     } else if (arg === '--receipt' && argv[i + 1]) {
       receiptPath = argv[++i];
     } else if (arg === '--emit-summary') {
@@ -202,6 +210,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     phase,
     help,
     configPath,
+    ...(boundaryPath ? { boundaryPath } : {}),
     ...(receiptPath ? { receiptPath } : {}),
     emitSummary,
     ...(summaryFile ? { summaryFile } : {}),
@@ -304,6 +313,27 @@ export async function executeCli(argv: string[]): Promise<{ exitCode: number; re
       ok: lockCompat.ok,
       durationMs: Date.now() - start,
       lockCompat,
+    });
+  } else if (opts.phase === 'boundary-audit') {
+    const boundaryAudit = runBoundaryAudit({
+      cwd: opts.cwd,
+      boundaryPath: opts.boundaryPath,
+      configPath: opts.configPath,
+    });
+    const configFullPath = resolve(opts.cwd, opts.configPath);
+    const manifest: HoloCiManifest = existsSync(configFullPath)
+      ? loadManifest(opts.configPath, opts.cwd)
+      : {
+          schema: HOLO_CI_SCHEMA,
+          name: opts.name ?? basename(opts.cwd),
+          kind: opts.kind ?? 'app',
+        };
+    receipt = buildReceipt({
+      manifest,
+      phase: 'boundary-audit',
+      ok: boundaryAudit.ok,
+      durationMs: Date.now() - start,
+      boundaryAudit,
     });
   } else {
     const manifest = loadManifest(opts.configPath, opts.cwd);

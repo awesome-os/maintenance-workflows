@@ -19,6 +19,7 @@ export interface BuildReceiptInput {
   pack?: HoloCiReceipt['pack'];
   maintain?: HoloCiReceipt['maintain'];
   lockCompat?: HoloCiReceipt['lockCompat'];
+  boundaryAudit?: HoloCiReceipt['boundaryAudit'];
   errors?: string[];
 }
 
@@ -38,6 +39,7 @@ export function buildReceipt(input: BuildReceiptInput): HoloCiReceipt {
     ...(input.pack ? { pack: input.pack } : {}),
     ...(input.maintain ? { maintain: input.maintain } : {}),
     ...(input.lockCompat ? { lockCompat: input.lockCompat } : {}),
+    ...(input.boundaryAudit ? { boundaryAudit: input.boundaryAudit } : {}),
     ...(input.errors && input.errors.length > 0 ? { errors: input.errors } : {}),
   };
 }
@@ -105,10 +107,26 @@ export function formatStepSummaryMarkdown(receipt: HoloCiReceipt): string {
     );
   }
 
+  if (receipt.boundaryAudit) {
+    const ba = receipt.boundaryAudit;
+    const a = ba.axes;
+    lines.push(
+      `| Boundary Audit | **${ba.score}/100** (files=${ba.scannedFiles}, manifest=${ba.manifestFound ? (ba.boundaryPath ?? 'yes') : 'default'}, violations=${ba.violations.length}) |`,
+      `| Boundary Axes | Purity ${a.dependencyPurity}/20 · Encap ${a.encapsulation}/20 · IPC ${a.ipcCompliance}/20 · ABI ${a.abiContract}/20 · Gov ${a.governance}/20 |`,
+    );
+  }
+
   if (receipt.verify && receipt.verify.guardViolations.length > 0) {
     lines.push('', '### Guard Violations', '');
     for (const v of receipt.verify.guardViolations) {
       lines.push(`- \`${v.guard}\` at \`${v.file}:${v.line}\`: \`${v.snippet}\``);
+    }
+  }
+
+  if (receipt.boundaryAudit && receipt.boundaryAudit.violations.length > 0) {
+    lines.push('', '### Boundary Violations', '');
+    for (const v of receipt.boundaryAudit.violations) {
+      lines.push(`- \`${v.rule}\` at \`${v.file}:${v.line}\`: ${v.message} (\`${v.snippet}\`)`);
     }
   }
 
