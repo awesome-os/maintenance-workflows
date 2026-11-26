@@ -18,6 +18,7 @@ export interface BuildReceiptInput {
   bump?: HoloCiReceipt['bump'];
   pack?: HoloCiReceipt['pack'];
   maintain?: HoloCiReceipt['maintain'];
+  lockCompat?: HoloCiReceipt['lockCompat'];
   errors?: string[];
 }
 
@@ -36,6 +37,7 @@ export function buildReceipt(input: BuildReceiptInput): HoloCiReceipt {
     ...(input.bump ? { bump: input.bump } : {}),
     ...(input.pack ? { pack: input.pack } : {}),
     ...(input.maintain ? { maintain: input.maintain } : {}),
+    ...(input.lockCompat ? { lockCompat: input.lockCompat } : {}),
     ...(input.errors && input.errors.length > 0 ? { errors: input.errors } : {}),
   };
 }
@@ -94,6 +96,12 @@ export function formatStepSummaryMarkdown(receipt: HoloCiReceipt): string {
     lines.push(
       `| Clean-Box Endpoints | ${okEndpoints}/${receipt.maintain.endpoints.length} HTTP 200 verified |`,
       `| Bundle Integrity | ${receipt.maintain.bundleChecked} checked (${receipt.maintain.bundleMismatches.length} mismatches) |`,
+    );
+  }
+
+  if (receipt.lockCompat) {
+    lines.push(
+      `| Lock Compat | \`lockfileVersion: ${receipt.lockCompat.lockfileVersion}\` · ${receipt.lockCompat.packageCount} entries (${receipt.lockCompat.resolvedFromPnpmLock} pnpm, ${receipt.lockCompat.resolvedFromMaxLock} max-lock, dryRun=${receipt.lockCompat.dryRun}) |`,
     );
   }
 

@@ -7,7 +7,15 @@ export const HOLO_V11_MANIFEST_SCHEMA = 'holo-v11.manifest.v1' as const;
 export const B8G_ABI_MAGIC_V3 = '0x33564742' as const;
 
 export type HoloCiKind = 'monorepo' | 'native-fork' | 'control-plane' | 'app';
-export type HoloCiPhase = 'verify' | 'sync' | 'bump' | 'pack' | 'telemetry' | 'maintain' | 'init';
+export type HoloCiPhase =
+  | 'verify'
+  | 'sync'
+  | 'bump'
+  | 'pack'
+  | 'telemetry'
+  | 'maintain'
+  | 'init'
+  | 'lock-compat';
 
 export interface HoloCiGuards {
   zeroGhost?: boolean;
@@ -183,6 +191,48 @@ export interface HoloCiMaintainResult {
   bundleMismatches: string[];
 }
 
+export interface HoloCiLockCompatPackageEntry {
+  name?: string;
+  version?: string;
+  resolved?: string;
+  integrity?: string;
+  link?: boolean;
+  dev?: boolean;
+  workspaces?: string[];
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+  holoCasStore?: 'v11';
+  zeroCopyNodeModules?: boolean;
+}
+
+export interface HoloCiLockfileV3 {
+  name: string;
+  version: string;
+  lockfileVersion: 3;
+  requires: true;
+  holoCasStore: 'v11';
+  zeroCopyNodeModules: true;
+  packages: Record<string, HoloCiLockCompatPackageEntry>;
+}
+
+export interface HoloCiLockCompatResult {
+  ok: boolean;
+  name: string;
+  version: string;
+  outFile: string;
+  dryRun: boolean;
+  written: boolean;
+  lockfileVersion: 3;
+  holoCasStore: 'v11';
+  zeroCopyNodeModules: true;
+  packageCount: number;
+  workspaceCount: number;
+  resolvedFromPnpmLock: number;
+  resolvedFromMaxLock: number;
+  sha256: string;
+  lockfile: HoloCiLockfileV3;
+}
+
 export interface HoloCiReceipt {
   schema: 'holo-ci.receipt.v1';
   abiMagic: '0x33564742';
@@ -197,6 +247,7 @@ export interface HoloCiReceipt {
   bump?: HoloCiBumpResult;
   pack?: HoloCiPackResult;
   maintain?: HoloCiMaintainResult;
+  lockCompat?: HoloCiLockCompatResult;
   errors?: string[];
 }
 

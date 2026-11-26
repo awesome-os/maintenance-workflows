@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runBump } from './bump.mts';
+import { runLockCompat } from './lock-compat.mts';
 import { runMaintain, verifyBundleManifest } from './maintain.mts';
 import { runPack } from './pack.mts';
 import {
@@ -331,6 +332,149 @@ describe('holo-ci maintain', () => {
   });
 });
 
+describe('holo-ci lock-compat', () => {
+  it('synthesizes deterministic byte-sorted lockfileVersion 3 without modifying node_modules', () => {
+    const dirA = makeTempDir('holo-ci-lock-a-');
+    const dirB = makeTempDir('holo-ci-lock-b-');
+    try {
+      const setupRepo = (dir: string, reverseKeys: boolean): void => {
+        mkdirSync(join(dir, 'workspaces', 'pkg-alpha'), { recursive: true });
+        mkdirSync(join(dir, 'node_modules', '.sentinel'), { recursive: true });
+        writeFileSync(join(dir, 'node_modules', '.sentinel', 'keep.txt'), 'untouched', 'utf8');
+
+        const deps = reverseKeys
+          ? { zod: '^3.25.0', '@types/node': '^24.0.0' }
+          : { '@types/node': '^24.0.0', zod: '^3.25.0' };
+        const devDeps = reverseKeys
+          ? { typescript: '^6.0.2', esbuild: '^0.28.0' }
+          : { esbuild: '^0.28.0', typescript: '^6.0.2' };
+
+        writeFileSync(
+          join(dir, 'package.json'),
+          JSON.stringify(
+            {
+              name: 'hybrid-workspace',
+              version: '1.2.3',
+              workspaces: ['workspaces/*'],
+              dependencies: deps,
+              devDependencies: devDeps,
+            },
+            null,
+            2,
+          ),
+          'utf8',
+        );
+
+        writeFileSync(
+          join(dir, 'workspaces', 'pkg-alpha', 'package.json'),
+          JSON.stringify(
+            {
+              name: '@hybrid/pkg-alpha',
+              version: '0.4.0',
+              dependencies: { hono: '^4.13.16' },
+            },
+            null,
+            2,
+          ),
+          'utf8',
+        );
+
+        writeFileSync(
+          join(dir, 'pnpm-lock.yaml'),
+          [
+            "lockfileVersion: '9.0'",
+            'importers:',
+            '  .:',
+            '    dependencies:',
+            "      '@types/node':",
+            '        specifier: ^24.0.0',
+            '        version: 24.5.1',
+            '      zod:',
+            '        specifier: ^3.25.0',
+            '        version: 3.25.76',
+            '    devDependencies:',
+            '      esbuild:',
+            '        specifier: ^0.28.0',
+            '        version: 0.28.2',
+            '      typescript:',
+            '        specifier: ^6.0.2',
+            '        version: 6.0.2',
+            '  workspaces/pkg-alpha:',
+            '    dependencies:',
+            '      hono:',
+            '        specifier: ^4.13.16',
+            '        version: 4.13.16',
+            'packages:',
+            "  '@types/node@24.5.1':",
+            '    resolution: {integrity: sha512-nodeTypesHash==}',
+            '  hono@4.13.16:',
+            '    resolution: {integrity: sha512-honoHash==}',
+            '',
+          ].join('\n'),
+          'utf8',
+        );
+
+        writeFileSync(
+          join(dir, 'max-version-lock.json'),
+          JSON.stringify({
+            schema: 'awesome-os.max-version-lock.v1',
+            libraries: [{ name: 'esbuild', maxVersion: '0.28.9' }],
+          }),
+          'utf8',
+        );
+      };
+
+      setupRepo(dirA, false);
+      setupRepo(dirB, true);
+
+      const resA = runLockCompat({ cwd: dirA });
+      const resB = runLockCompat({ cwd: dirB });
+
+      assert.equal(resA.ok, true);
+      assert.equal(resA.written, true);
+      assert.equal(resA.lockfileVersion, 3);
+      assert.equal(resA.holoCasStore, 'v11');
+      assert.equal(resA.zeroCopyNodeModules, true);
+      assert.equal(resA.workspaceCount, 1);
+      assert.equal(resA.resolvedFromMaxLock, 1);
+      assert.equal(resA.resolvedFromPnpmLock, 4);
+      assert.equal(resA.sha256, resB.sha256);
+
+      const rawA = readFileSync(join(dirA, 'package-lock.json'), 'utf8');
+      const rawB = readFileSync(join(dirB, 'package-lock.json'), 'utf8');
+      assert.equal(rawA, rawB);
+
+      const parsed = JSON.parse(rawA) as {
+        lockfileVersion: number;
+        holoCasStore: string;
+        zeroCopyNodeModules: boolean;
+        packages: Record<string, { version?: string; integrity?: string; resolved?: string; link?: boolean }>;
+      };
+      assert.equal(parsed.lockfileVersion, 3);
+      assert.equal(parsed.holoCasStore, 'v11');
+      assert.equal(parsed.zeroCopyNodeModules, true);
+      assert.equal(parsed.packages['node_modules/@types/node'].version, '24.5.1');
+      assert.equal(parsed.packages['node_modules/@types/node'].integrity, 'sha512-nodeTypesHash==');
+      assert.equal(parsed.packages['node_modules/esbuild'].version, '0.28.9');
+      assert.equal(parsed.packages['node_modules/hono'].version, '4.13.16');
+      assert.equal(parsed.packages['node_modules/@hybrid/pkg-alpha'].resolved, 'workspaces/pkg-alpha');
+      assert.equal(parsed.packages['node_modules/@hybrid/pkg-alpha'].link, true);
+
+      // Verify byte-sorted keys in `packages`
+      const keys = Object.keys(parsed.packages);
+      const sorted = [...keys].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      assert.deepEqual(keys, sorted);
+
+      // Verify zero node_modules mutation
+      assert.equal(readFileSync(join(dirA, 'node_modules', '.sentinel', 'keep.txt'), 'utf8'), 'untouched');
+      assert.equal(existsSync(join(dirA, 'node_modules', '.package-lock.json')), false);
+    } finally {
+      rmSync(dirA, { recursive: true, force: true });
+      rmSync(dirB, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('holo-ci CLI', () => {
   it('prints help for --help and executes init + verify --json', () => {
     const cliPath = join(HERE, 'cli.mts');
@@ -339,6 +483,7 @@ describe('holo-ci CLI', () => {
     assert.match(helpRes.stdout, /verify/);
     assert.match(helpRes.stdout, /maintain/);
     assert.match(helpRes.stdout, /init/);
+    assert.match(helpRes.stdout, /lock-compat/);
 
     const dir = makeTempDir();
     try {
@@ -366,6 +511,54 @@ describe('holo-ci CLI', () => {
       assert.equal(parsed.abiMagic, B8G_ABI_MAGIC_V3);
       assert.equal(parsed.phase, 'verify');
       assert.equal(parsed.ok, true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('executes lock-compat --dry-run --json without writing package-lock.json or touching node_modules', () => {
+    const cliPath = join(HERE, 'cli.mts');
+    const dir = makeTempDir('holo-ci-cli-lock-');
+    try {
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({
+          name: 'cli-lock-demo',
+          version: '2.0.0',
+          dependencies: { hono: '^4.13.16' },
+        }),
+        'utf8',
+      );
+      const res = spawnSync(
+        process.execPath,
+        [cliPath, 'lock-compat', '--cwd', dir, '--dry-run', '--json'],
+        { encoding: 'utf8' },
+      );
+      assert.equal(res.status, 0, res.stderr);
+      const receipt = JSON.parse(res.stdout) as {
+        schema: string;
+        abiMagic: string;
+        phase: string;
+        ok: boolean;
+        lockCompat?: {
+          lockfileVersion: number;
+          holoCasStore: string;
+          zeroCopyNodeModules: boolean;
+          dryRun: boolean;
+          written: boolean;
+        };
+      };
+      assert.equal(receipt.schema, HOLO_CI_RECEIPT_SCHEMA);
+      assert.equal(receipt.abiMagic, B8G_ABI_MAGIC_V3);
+      assert.equal(receipt.phase, 'lock-compat');
+      assert.equal(receipt.ok, true);
+      assert.equal(receipt.lockCompat?.lockfileVersion, 3);
+      assert.equal(receipt.lockCompat?.holoCasStore, 'v11');
+      assert.equal(receipt.lockCompat?.zeroCopyNodeModules, true);
+      assert.equal(receipt.lockCompat?.dryRun, true);
+      assert.equal(receipt.lockCompat?.written, false);
+      assert.equal(existsSync(join(dir, 'package-lock.json')), false);
+      assert.equal(existsSync(join(dir, 'node_modules')), false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

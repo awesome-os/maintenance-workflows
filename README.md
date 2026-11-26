@@ -39,8 +39,27 @@ Run directly via native Node 24/26 (`node holo-ci/cli.mts <phase> [options]`):
 | `telemetry` | Emits `holo-ci.receipt.v1` JSON/NDJSON (`--receipt`) and appends Markdown summaries to `$GITHUB_STEP_SUMMARY` (`--emit-summary`). |
 | `maintain` | Performs zero-checkout clean-box HTTP `200`, SHA-512, and Ed25519 signature verification (`node:crypto`). |
 | `init` | Scaffolds a starter `holo-ci.json` manifest in the target directory. |
+| `lock-compat` | Synthesizes a deterministic, byte-sorted npm `lockfileVersion: 3` `package-lock.json` (`holoCasStore: "v11"`, `zeroCopyNodeModules: true`) from `package.json`, `pnpm-lock.yaml`, and `max-version-lock.json` without modifying `node_modules`. |
 
-Common flags: `--config <path>`, `--receipt <path>`, `--emit-summary`, `--json`, `--cwd <dir>`, `--help`.
+Common flags: `--config <path>`, `--receipt <path>`, `--emit-summary`, `--json`, `--cwd <dir>`, `--out <path>`, `--dry-run`, `--max-lock <path>`, `--help`.
+
+### Zero-Migration Strangler-Fig Hybrid Workspace Pattern (`holo-ci lock-compat`)
+
+When migrating or interoperating between standard npm tooling and the Awesome-OS `v11` CAS / `pnpm` store without duplicating `node_modules`, use the **Zero-Migration Strangler-Fig Hybrid Workspace Pattern**:
+
+1. **Create strangler-fig workspaces cleanly** with npm CLI:
+   ```sh
+   npm init -w ./workspaces/<pkg>
+   ```
+2. **Keep runtime dependencies deduplicated** in the zero-copy `pnpm` / `holo-v11` CAS store (`pnpm-lock.yaml` + `max-version-lock.json`).
+3. **Emit or refresh `package-lock.json` (`lockfileVersion: 3`) without touching `node_modules`**:
+   ```sh
+   # Standard npm lockfile-only sync OR zero-dependency holo-ci synthesis
+   npm i --package-lock-only
+   node holo-ci/cli.mts lock-compat --cwd . --out package-lock.json --dry-run --json
+   ```
+
+`holo-ci lock-compat` reads `package.json` (`name`, `version`, `dependencies`, `devDependencies`, `workspaces`), resolves exact versions/integrity hashes from `pnpm-lock.yaml` and `max-version-lock.json` if present, and emits a deterministic byte-sorted `lockfileVersion: 3` manifest stamped with `"holoCasStore": "v11"` and `"zeroCopyNodeModules": true` while leaving `node_modules` completely untouched.
 
 ### 2. 5-OS Native Matrix Release (`reusable-5os-release.yml`)
 ```yaml

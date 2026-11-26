@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runBump } from './bump.mts';
+import { runLockCompat } from './lock-compat.mts';
 import { runMaintain } from './maintain.mts';
 import { runPack } from './pack.mts';
 import {
@@ -32,6 +33,7 @@ export interface ParsedCliArgs {
   force: boolean;
   name?: string;
   kind?: HoloCiKind;
+  maxLockPath?: string;
 }
 
 const VALID_PHASES = new Set<HoloCiPhase>([
@@ -42,6 +44,7 @@ const VALID_PHASES = new Set<HoloCiPhase>([
   'telemetry',
   'maintain',
   'init',
+  'lock-compat',
 ]);
 
 export function getHelpText(): string {
@@ -52,13 +55,14 @@ export function getHelpText(): string {
     '  node holo-ci/cli.mts <phase> [options]',
     '',
     'Phases:',
-    '  verify      Run tests, nativeGates, doc checks, and zeroGhost/zeroCasV1/zeroHttpIpc guards',
-    '  sync        Compare recursive SHA-256 syncPairs and audit git working-tree status',
-    '  bump        Check upstream semver pins (pinned >= upstream) and bump package.json (--version)',
-    '  pack        Generate deterministic holo-v11-manifest.json & SHA512SUMS.txt with dedup stats',
-    '  telemetry   Emit holo-ci.receipt.v1 JSON/NDJSON and optional GitHub Step Summary',
-    '  maintain    Verify clean-box HTTP 200 endpoints, SHA-512 bundles, and Ed25519 signatures',
-    '  init        Scaffold a starter holo-ci.json manifest in the target directory',
+    '  verify       Run tests, nativeGates, doc checks, and zeroGhost/zeroCasV1/zeroHttpIpc guards',
+    '  sync         Compare recursive SHA-256 syncPairs and audit git working-tree status',
+    '  bump         Check upstream semver pins (pinned >= upstream) and bump package.json (--version)',
+    '  pack         Generate deterministic holo-v11-manifest.json & SHA512SUMS.txt with dedup stats',
+    '  telemetry    Emit holo-ci.receipt.v1 JSON/NDJSON and optional GitHub Step Summary',
+    '  maintain     Verify clean-box HTTP 200 endpoints, SHA-512 bundles, and Ed25519 signatures',
+    '  init         Scaffold a starter holo-ci.json manifest in the target directory',
+    '  lock-compat  Synthesize deterministic lockfileVersion: 3 package-lock.json without mutating node_modules',
     '',
     'Options:',
     '  --config <path>        Path to holo-ci.json (default: holo-ci.json)',
@@ -68,8 +72,9 @@ export function getHelpText(): string {
     '  --json                 Print receipt JSON to stdout',
     '  --version <X.Y.Z>      Target semver for `bump`',
     '  --package <path>       Path to package.json for `bump` (default: package.json)',
-    '  --dry-run              Preview `bump` without modifying package.json',
-    '  --out <dir>            Output directory for `pack`',
+    '  --dry-run              Preview `bump` or `lock-compat` without writing files',
+    '  --out <path>           Output directory for `pack` or output lockfile for `lock-compat` (default: package-lock.json)',
+    '  --max-lock <path>      Optional max-version-lock.json override file for `lock-compat`',
     '  --cwd <dir>            Working directory override',
     '  --name <name>          Project name for `init`',
     '  --kind <kind>          Project kind for `init` (monorepo|native-fork|control-plane|app)',
@@ -96,6 +101,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
   let force = false;
   let name: string | undefined;
   let kind: HoloCiKind | undefined;
+  let maxLockPath: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -119,6 +125,8 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
       dryRun = true;
     } else if (arg === '--out' && argv[i + 1]) {
       outDir = argv[++i];
+    } else if (arg === '--max-lock' && argv[i + 1]) {
+      maxLockPath = argv[++i];
     } else if (arg === '--cwd' && argv[i + 1]) {
       cwd = resolve(argv[++i]);
     } else if (arg === '--force') {
@@ -154,6 +162,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     force,
     ...(name ? { name } : {}),
     ...(kind ? { kind } : {}),
+    ...(maxLockPath ? { maxLockPath } : {}),
   };
 }
 
@@ -211,6 +220,28 @@ export async function executeCli(argv: string[]): Promise<{ exitCode: number; re
       phase: 'init',
       ok: true,
       durationMs: Date.now() - start,
+    });
+  } else if (opts.phase === 'lock-compat') {
+    const lockCompat = runLockCompat({
+      cwd: opts.cwd,
+      outFile: opts.outDir,
+      dryRun: opts.dryRun,
+      maxLockPath: opts.maxLockPath,
+    });
+    const configFullPath = resolve(opts.cwd, opts.configPath);
+    const manifest: HoloCiManifest = existsSync(configFullPath)
+      ? loadManifest(opts.configPath, opts.cwd)
+      : {
+          schema: HOLO_CI_SCHEMA,
+          name: lockCompat.name,
+          kind: opts.kind ?? 'app',
+        };
+    receipt = buildReceipt({
+      manifest,
+      phase: 'lock-compat',
+      ok: lockCompat.ok,
+      durationMs: Date.now() - start,
+      lockCompat,
     });
   } else {
     const manifest = loadManifest(opts.configPath, opts.cwd);
