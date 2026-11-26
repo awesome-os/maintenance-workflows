@@ -111,6 +111,99 @@ describe('holo-ci verify & guards', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('validates spdxLicense (MIT, BSD-3-Clause, Apache-2.0), gitattributes, and codeowners governance guards', () => {
+    const dir = makeTempDir('holo-ci-governance-');
+    try {
+      // 1. Missing all governance files
+      const missing = scanGuardViolations(dir, {
+        spdxLicense: true,
+        gitattributes: true,
+        codeowners: true,
+      });
+      assert.deepEqual(
+        missing.map((v) => v.guard),
+        ['spdxLicense', 'gitattributes', 'codeowners'],
+      );
+
+      // 2. Truncated MIT / truncated BSD-3-Clause / invalid .gitattributes must be rejected
+      writeFileSync(
+        join(dir, 'LICENSE'),
+        'MIT License\n\nCopyright (c) 2026 Awesome-OS Contributors\n\nPermission is hereby granted, free of charge...\n',
+        'utf8',
+      );
+      writeFileSync(join(dir, '.gitattributes'), '* text=auto\n', 'utf8');
+      const truncatedMit = scanGuardViolations(dir, {
+        spdxLicense: true,
+        gitattributes: true,
+        codeowners: true,
+      });
+      assert.deepEqual(
+        truncatedMit.map((v) => v.guard),
+        ['spdxLicense', 'gitattributes', 'codeowners'],
+      );
+
+      writeFileSync(
+        join(dir, 'LICENSE'),
+        'BSD 3-Clause License\n\nRedistribution and use in source and binary forms, with or without modification, are permitted.\n',
+        'utf8',
+      );
+      const truncatedBsd = scanGuardViolations(dir, { spdxLicense: true });
+      assert.equal(truncatedBsd.length, 1);
+      assert.equal(truncatedBsd[0].guard, 'spdxLicense');
+
+      // 3. Full MIT + eol=lf .gitattributes + .github/CODEOWNERS pass cleanly
+      writeFileSync(
+        join(dir, 'LICENSE'),
+        [
+          'MIT License',
+          '',
+          'Permission is hereby granted, free of charge, to any person obtaining a copy',
+          'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.',
+        ].join('\n'),
+        'utf8',
+      );
+      writeFileSync(join(dir, '.gitattributes'), '* text=auto eol=lf\n', 'utf8');
+      mkdirSync(join(dir, '.github'), { recursive: true });
+      writeFileSync(join(dir, '.github', 'CODEOWNERS'), '* @lemanschik\n', 'utf8');
+
+      const passMit = scanGuardViolations(dir, {
+        spdxLicense: true,
+        gitattributes: true,
+        codeowners: true,
+      });
+      assert.equal(passMit.length, 0);
+
+      // 4. Full BSD-3-Clause + root CODEOWNERS fallback pass cleanly
+      rmSync(join(dir, '.github', 'CODEOWNERS'));
+      writeFileSync(join(dir, 'CODEOWNERS'), '* @lemanschik\n', 'utf8');
+      writeFileSync(
+        join(dir, 'LICENSE'),
+        [
+          'Redistribution and use in source and binary forms, with or without modification, are permitted.',
+          'THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS".',
+        ].join('\n'),
+        'utf8',
+      );
+      const passBsd = scanGuardViolations(dir, {
+        spdxLicense: true,
+        gitattributes: true,
+        codeowners: true,
+      });
+      assert.equal(passBsd.length, 0);
+
+      // 5. Apache-2.0 passes cleanly
+      writeFileSync(
+        join(dir, 'LICENSE'),
+        'Apache License\nVersion 2.0, January 2004\nhttp://www.apache.org/licenses/\n',
+        'utf8',
+      );
+      const passApache = scanGuardViolations(dir, { spdxLicense: true });
+      assert.equal(passApache.length, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('holo-ci sync', () => {

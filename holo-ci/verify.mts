@@ -81,7 +81,9 @@ function isAllowlistedGuardLine(lineText: string, relPath: string): boolean {
 
   // Exclude guard configuration keys in JSON manifests
   if (relPath.endsWith('holo-ci.json') || relPath.endsWith('package.json')) {
-    if (/^\s*"(zeroGhost|zeroCasV1|zeroHttpIpc)"\s*:/.test(lineText)) return true;
+    if (/^\s*"(zeroGhost|zeroCasV1|zeroHttpIpc|spdxLicense|gitattributes|codeowners)"\s*:/.test(lineText)) {
+      return true;
+    }
   }
 
   // Exclude explicit === 0 scanner/telemetry checks (e.g., gravity telemetry checking for 0 remnants)
@@ -137,6 +139,72 @@ export function scanGuardViolations(
           snippet: lineText.trim().slice(0, 160),
         });
       }
+    }
+  }
+
+  if (guards.spdxLicense) {
+    const licensePath = resolve(cwd, 'LICENSE');
+    if (!existsSync(licensePath)) {
+      violations.push({
+        guard: 'spdxLicense',
+        file: 'LICENSE',
+        line: 1,
+        snippet: 'Missing LICENSE file',
+      });
+    } else {
+      const licenseText = readFileSync(licensePath, 'utf8');
+      const isMit =
+        licenseText.includes('Permission is hereby granted, free of charge') &&
+        licenseText.includes('THE SOFTWARE IS PROVIDED "AS IS"');
+      const isBsd3 =
+        licenseText.includes('Redistribution and use in source and binary forms') &&
+        licenseText.includes('THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS');
+      const isApache2 =
+        licenseText.includes('Apache License') && licenseText.includes('Version 2.0');
+
+      if (!isMit && !isBsd3 && !isApache2) {
+        violations.push({
+          guard: 'spdxLicense',
+          file: 'LICENSE',
+          line: 1,
+          snippet: 'LICENSE missing non-truncated OSI/SPDX clause text (MIT, BSD-3-Clause, or Apache-2.0)',
+        });
+      }
+    }
+  }
+
+  if (guards.gitattributes) {
+    const gitattributesPath = resolve(cwd, '.gitattributes');
+    if (!existsSync(gitattributesPath)) {
+      violations.push({
+        guard: 'gitattributes',
+        file: '.gitattributes',
+        line: 1,
+        snippet: 'Missing .gitattributes file',
+      });
+    } else {
+      const gitattributesText = readFileSync(gitattributesPath, 'utf8');
+      if (!/eol=lf/i.test(gitattributesText)) {
+        violations.push({
+          guard: 'gitattributes',
+          file: '.gitattributes',
+          line: 1,
+          snippet: '.gitattributes missing eol=lf rule',
+        });
+      }
+    }
+  }
+
+  if (guards.codeowners) {
+    const hasGithubCodeowners = existsSync(resolve(cwd, '.github', 'CODEOWNERS'));
+    const hasRootCodeowners = existsSync(resolve(cwd, 'CODEOWNERS'));
+    if (!hasGithubCodeowners && !hasRootCodeowners) {
+      violations.push({
+        guard: 'codeowners',
+        file: '.github/CODEOWNERS',
+        line: 1,
+        snippet: 'Missing .github/CODEOWNERS or CODEOWNERS file',
+      });
     }
   }
 

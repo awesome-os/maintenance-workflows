@@ -1,0 +1,113 @@
+name: Reusable Holo-CI Autoroller (v1)
+
+on:
+  workflow_call:
+    inputs:
+      config-path:
+        description: 'Path to holo-ci.json manifest relative to repository root'
+        required: false
+        default: 'holo-ci.json'
+        type: string
+      tracking-issue:
+        description: 'Tracking issue reference added as Bug trailer'
+        required: false
+        default: 'awesome-os/awesome-os#1'
+        type: string
+      base-branch:
+        description: 'Target base branch for autoroll pull requests'
+        required: false
+        default: 'main'
+        type: string
+      auto-merge:
+        description: 'Enable squash auto-merge on opened autoroll pull request'
+        required: false
+        default: false
+        type: boolean
+      holo-ci-ref:
+        description: 'Git ref of awesome-os/maintenance-workflows to check out'
+        required: false
+        default: 'v1'
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  holo-autoroll:
+    name: Holo-CI Upstream Autoroll
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base-branch }}
+
+      - name: Checkout holo-ci runtime
+        uses: actions/checkout@v4
+        with:
+          repository: awesome-os/maintenance-workflows
+          ref: ${{ inputs.holo-ci-ref }}
+          path: .holo-ci-runtime
+
+      - name: Setup Node.js 26
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+
+      - name: Bump upstream pins via holo-ci
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          node .holo-ci-runtime/holo-ci/cli.mts bump \
+            --fetch-upstream \
+            --apply-pins \
+            --config "${{ inputs.config-path }}" \
+            --emit-summary
+          rm -rf .holo-ci-runtime
+
+      - name: Open autoroll pull request if pins changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUTO_MERGE: ${{ inputs.auto-merge }}
+          BASE_BRANCH: ${{ inputs.base-branch }}
+          TRACKING_ISSUE: ${{ inputs.tracking-issue }}
+          AUTORUN_BRANCH: autoroll/upstream-pins-${{ github.run_id }}
+        run: |
+          CHANGED="$(git status --porcelain)"
+          if [ -z "${CHANGED}" ]; then
+            echo "No upstream pin changes detected; skipping autoroll PR."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout -b "${AUTORUN_BRANCH}"
+          git add -A
+          git commit \
+            -m "chore(autoroll): bump upstream pins" \
+            -m "Bug: ${TRACKING_ISSUE}" \
+            -m "Verified-By: holo-ci@v1"
+
+          git push origin "${AUTORUN_BRANCH}"
+
+          gh label create "type/autoroll" \
+            --color "0e8a16" \
+            --description "Automated upstream pin roll" \
+            --force >/dev/null 2>&1 || true
+
+          PR_BODY="$(printf 'Automated upstream pin roll via `holo-ci bump --fetch-upstream --apply-pins`.\n\nBug: %s\nVerified-By: holo-ci@v1\n' "${TRACKING_ISSUE}")"
+
+          PR_URL="$(gh pr create \
+            --base "${BASE_BRANCH}" \
+            --head "${AUTORUN_BRANCH}" \
+            --title "chore(autoroll): bump upstream pins" \
+            --body "${PR_BODY}" \
+            --label "type/autoroll")"
+
+          echo "Opened autoroll PR: ${PR_URL}"
+
+          if [ "${AUTO_MERGE}" = "true" ]; then
+            gh pr merge --auto --squash "${PR_URL}"
+          fi

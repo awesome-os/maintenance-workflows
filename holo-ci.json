@@ -10,6 +10,10 @@
   ],
   "guards": {
     "zeroGhost": true,
-    "zeroCasV1": true
+    "zeroCasV1": true,
+    "zeroHttpIpc": true,
+    "spdxLicense": true,
+    "gitattributes": true,
+    "codeowners": true
   }
 }
