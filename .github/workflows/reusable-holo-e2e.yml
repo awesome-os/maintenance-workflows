@@ -28,6 +28,11 @@ on:
         required: false
         default: 'ghcr.io/awesome-os/holo-e2e-runner:latest'
         type: string
+      runner-tier:
+        description: 'OCI E2E runner tier (gpu | lite)'
+        required: false
+        default: 'gpu'
+        type: string
       artifacts-path:
         description: 'Artifacts directory relative to github.workspace'
         required: false
@@ -62,6 +67,20 @@ jobs:
         run: |
           set -euo pipefail
           TARGET_IMAGE="${{ inputs.runner-image }}"
+          RUNNER_TIER="${{ inputs.runner-tier }}"
+          FALLBACK_TARBALL="holo-e2e-runner-linux-amd64.oci.tar.gz"
+          FALLBACK_SUMS="SHA512SUMS-holo-e2e-runner.txt"
+          DEFAULT_IMAGE="ghcr.io/awesome-os/holo-e2e-runner:latest"
+
+          if [ "$RUNNER_TIER" = "lite" ]; then
+            DEFAULT_IMAGE="ghcr.io/awesome-os/holo-e2e-lite:latest"
+            if [ "$TARGET_IMAGE" = "ghcr.io/awesome-os/holo-e2e-runner:latest" ]; then
+              TARGET_IMAGE="ghcr.io/awesome-os/holo-e2e-lite:latest"
+            fi
+            FALLBACK_TARBALL="holo-e2e-lite-linux-amd64.oci.tar.gz"
+            FALLBACK_SUMS="SHA512SUMS-holo-e2e-lite.txt"
+          fi
+
           RESOLVED_IMAGE=""
           IMAGE_SOURCE=""
 
@@ -73,23 +92,24 @@ jobs:
             echo "GHCR pull unavailable for ${TARGET_IMAGE}; falling back to sovereign OCI release tarball."
             rm -rf /tmp/holo-oci
             mkdir -p /tmp/holo-oci
-            curl -fsSL -o /tmp/holo-oci/holo-e2e-runner-linux-amd64.oci.tar.gz \
-              "https://github.com/awesome-os/dockerimages/releases/download/v11-oci-latest/holo-e2e-runner-linux-amd64.oci.tar.gz"
-            curl -fsSL -o /tmp/holo-oci/SHA512SUMS-holo-e2e-runner.txt \
-              "https://github.com/awesome-os/dockerimages/releases/download/v11-oci-latest/SHA512SUMS-holo-e2e-runner.txt"
-            (cd /tmp/holo-oci && sha512sum -c SHA512SUMS-holo-e2e-runner.txt)
-            LOAD_OUT="$(docker load -i /tmp/holo-oci/holo-e2e-runner-linux-amd64.oci.tar.gz)"
+            curl -fsSL -o "/tmp/holo-oci/${FALLBACK_TARBALL}" \
+              "https://github.com/awesome-os/dockerimages/releases/download/v11-oci-latest/${FALLBACK_TARBALL}"
+            curl -fsSL -o "/tmp/holo-oci/${FALLBACK_SUMS}" \
+              "https://github.com/awesome-os/dockerimages/releases/download/v11-oci-latest/${FALLBACK_SUMS}"
+            (cd /tmp/holo-oci && sha512sum -c "${FALLBACK_SUMS}")
+            LOAD_OUT="$(docker load -i "/tmp/holo-oci/${FALLBACK_TARBALL}")"
             echo "$LOAD_OUT"
             LOADED_IMG="$(printf '%s\n' "$LOAD_OUT" | sed -n 's/^Loaded image: //p' | tail -n 1)"
             if [ -z "$LOADED_IMG" ]; then
               LOADED_IMG="$(printf '%s\n' "$LOAD_OUT" | sed -n 's/^Loaded image ID: //p' | tail -n 1)"
             fi
-            RESOLVED_IMAGE="${LOADED_IMG:-ghcr.io/awesome-os/holo-e2e-runner:latest}"
+            RESOLVED_IMAGE="${LOADED_IMG:-$DEFAULT_IMAGE}"
             IMAGE_SOURCE="release:v11-oci-latest (${RESOLVED_IMAGE})"
           fi
 
           {
             echo "RUNNER_IMAGE=${RESOLVED_IMAGE}"
+            echo "RUNNER_TIER=${RUNNER_TIER}"
             echo "HOLO_E2E_IMAGE_SOURCE=${IMAGE_SOURCE}"
           } >> "$GITHUB_ENV"
           echo "Resolved runner image: ${RESOLVED_IMAGE} (${IMAGE_SOURCE})"
@@ -115,10 +135,18 @@ jobs:
             -w "$WORKDIR" \
             -e "HOLO_E2E_ARTIFACTS=/workspace/${{ inputs.artifacts-path }}" \
             -e "HOLO_CONFIG_PATH=${{ inputs.config-path }}" \
+            -e "RUNNER_TIER=${RUNNER_TIER}" \
             -e "E2E_CMD=${E2E_CMD}" \
             -e "GITHUB_TOKEN=${GITHUB_TOKEN}" \
             "$RUNNER_IMAGE" bash -euo pipefail -c '
-              /usr/local/bin/holo-e2e-probe --out "$HOLO_E2E_ARTIFACTS/offscreen-probe.bmp" | tee "$HOLO_E2E_ARTIFACTS/offscreen-probe.json"
+              if [ -x /usr/local/bin/holo-e2e-probe ]; then
+                /usr/local/bin/holo-e2e-probe --out "$HOLO_E2E_ARTIFACTS/offscreen-probe.bmp" | tee "$HOLO_E2E_ARTIFACTS/offscreen-probe.json"
+              elif [ "${RUNNER_TIER:-gpu}" = "lite" ]; then
+                printf '\''{"tier":"lite","lavapipeIcd":"skipped-lite","bmpSha512":"skipped-lite"}\n'\'' > "$HOLO_E2E_ARTIFACTS/offscreen-probe.json"
+              else
+                echo "Missing /usr/local/bin/holo-e2e-probe in gpu runner tier" >&2
+                exit 1
+              fi
               node /workspace/.holo-ci-runtime/holo-ci/cli.mts verify \
                 --config "$HOLO_CONFIG_PATH" \
                 --receipt "$HOLO_E2E_ARTIFACTS/holo-e2e-receipt.ndjson"
