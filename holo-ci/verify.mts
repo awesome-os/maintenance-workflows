@@ -1,0 +1,187 @@
+import { spawnSync } from 'node:child_process';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
+import type {
+  HoloCiCommandResult,
+  HoloCiDocCheckResult,
+  HoloCiGuardViolation,
+  HoloCiGuards,
+  HoloCiManifest,
+  HoloCiVerifyResult,
+} from './schema.mts';
+
+const GHOST_TOKEN = ['b8g', 'ghost'].join('-');
+const CAS_V1_TOKEN = ['cas', 'v1'].join('-');
+const LOCALHOST_HTTP_PREFIX = ['http', '://'].join('');
+
+const GHOST_REGEX = new RegExp(`\\b${GHOST_TOKEN}\\b`, 'i');
+const CAS_V1_REGEX = new RegExp(`\\b${CAS_V1_TOKEN}(?![0-9])\\b`, 'i');
+const HTTP_IPC_REGEX = new RegExp(`${LOCALHOST_HTTP_PREFIX}(?:127\\.0\\.0\\.1|localhost)(?::\\d+)?`, 'i');
+
+export function runShellCommand(
+  command: string,
+  cwd: string,
+  kind: 'test' | 'nativeGate' = 'test',
+): HoloCiCommandResult {
+  const start = Date.now();
+  const isWin = process.platform === 'win32';
+  const needsPwsh = isWin && (command.includes('.ps1') || command.includes('$env:'));
+
+  const res = needsPwsh
+    ? spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', command], {
+        cwd,
+        encoding: 'utf8',
+        env: process.env,
+      })
+    : spawnSync(command, {
+        cwd,
+        shell: true,
+        encoding: 'utf8',
+        env: process.env,
+      });
+
+  const durationMs = Date.now() - start;
+  const exitCode = res.status ?? (res.error ? 1 : 0);
+  const stderr = res.error ? `${res.stderr ?? ''}\n${res.error.message}`.trim() : (res.stderr ?? '');
+
+  return {
+    command,
+    kind,
+    exitCode,
+    durationMs,
+    ok: exitCode === 0,
+    stdout: res.stdout ?? '',
+    stderr,
+  };
+}
+
+function collectGuardScanFiles(cwd: string, extraFiles: string[] = []): string[] {
+  const candidates: string[] = [];
+  const workflowsDir = resolve(cwd, '.github', 'workflows');
+  if (existsSync(workflowsDir)) {
+    for (const entry of readdirSync(workflowsDir, { withFileTypes: true })) {
+      if (entry.isFile() && /\.(ya?ml)$/i.test(entry.name)) {
+        candidates.push(join(workflowsDir, entry.name));
+      }
+    }
+  }
+  for (const rootFile of ['holo-ci.json', 'package.json']) {
+    const p = resolve(cwd, rootFile);
+    if (existsSync(p)) candidates.push(p);
+  }
+  for (const extra of extraFiles) {
+    const p = resolve(cwd, extra);
+    if (existsSync(p)) candidates.push(p);
+  }
+  return candidates;
+}
+
+function isAllowlistedGuardLine(lineText: string, relPath: string): boolean {
+  if (lineText.includes('holo-ci-allow-guard')) return true;
+
+  // Exclude guard configuration keys in JSON manifests
+  if (relPath.endsWith('holo-ci.json') || relPath.endsWith('package.json')) {
+    if (/^\s*"(zeroGhost|zeroCasV1|zeroHttpIpc)"\s*:/.test(lineText)) return true;
+  }
+
+  // Exclude explicit === 0 scanner/telemetry checks (e.g., gravity telemetry checking for 0 remnants)
+  if (
+    lineText.includes('b8gGhostRemnants') ||
+    /\/\^?b8g-ghost/i.test(lineText) ||
+    /===\s*0/.test(lineText) ||
+    /\|\s*`dup_v8`\s*\/\s*`b8g-ghost`\s*\|/.test(lineText)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+export function scanGuardViolations(
+  cwd: string,
+  guards: HoloCiGuards,
+  extraFiles: string[] = [],
+): HoloCiGuardViolation[] {
+  const violations: HoloCiGuardViolation[] = [];
+  const files = collectGuardScanFiles(cwd, extraFiles);
+
+  for (const filePath of files) {
+    const relPath = relative(cwd, filePath).replace(/\\/g, '/');
+    const lines = readFileSync(filePath, 'utf8').split(/\r?\n/);
+
+    for (let i = 0; i < lines.length; i++) {
+      const lineText = lines[i];
+      if (isAllowlistedGuardLine(lineText, relPath)) continue;
+
+      if (guards.zeroGhost && GHOST_REGEX.test(lineText)) {
+        violations.push({
+          guard: 'zeroGhost',
+          file: relPath,
+          line: i + 1,
+          snippet: lineText.trim().slice(0, 160),
+        });
+      }
+      if (guards.zeroCasV1 && CAS_V1_REGEX.test(lineText)) {
+        violations.push({
+          guard: 'zeroCasV1',
+          file: relPath,
+          line: i + 1,
+          snippet: lineText.trim().slice(0, 160),
+        });
+      }
+      if (guards.zeroHttpIpc && HTTP_IPC_REGEX.test(lineText)) {
+        violations.push({
+          guard: 'zeroHttpIpc',
+          file: relPath,
+          line: i + 1,
+          snippet: lineText.trim().slice(0, 160),
+        });
+      }
+    }
+  }
+
+  return violations;
+}
+
+export function runVerify(
+  manifest: HoloCiManifest,
+  options: { cwd?: string; skipTests?: boolean; skipGates?: boolean; extraScanFiles?: string[] } = {},
+): HoloCiVerifyResult {
+  const cwd = options.cwd ?? process.cwd();
+  const tests: HoloCiCommandResult[] = [];
+  const nativeGates: HoloCiCommandResult[] = [];
+  const docs: HoloCiDocCheckResult[] = [];
+
+  if (!options.skipTests) {
+    for (const cmd of manifest.tests ?? []) {
+      tests.push(runShellCommand(cmd, cwd, 'test'));
+    }
+  }
+
+  if (!options.skipGates) {
+    for (const cmd of manifest.nativeGates ?? []) {
+      nativeGates.push(runShellCommand(cmd, cwd, 'nativeGate'));
+    }
+  }
+
+  for (const docPath of manifest.docs ?? []) {
+    const full = resolve(cwd, docPath);
+    docs.push({ path: docPath, exists: existsSync(full) });
+  }
+
+  const guardViolations = scanGuardViolations(cwd, manifest.guards ?? {}, options.extraScanFiles);
+
+  const ok =
+    tests.every((t) => t.ok) &&
+    nativeGates.every((g) => g.ok) &&
+    docs.every((d) => d.exists) &&
+    guardViolations.length === 0;
+
+  return {
+    ok,
+    tests,
+    nativeGates,
+    docs,
+    guardViolations,
+  };
+}

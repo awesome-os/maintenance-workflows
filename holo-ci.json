@@ -1,0 +1,15 @@
+{
+  "schema": "holo-ci.v1",
+  "name": "maintenance-workflows",
+  "kind": "control-plane",
+  "tests": [
+    "node --test holo-ci/holo-ci.test.mts"
+  ],
+  "docs": [
+    "README.md"
+  ],
+  "guards": {
+    "zeroGhost": true,
+    "zeroCasV1": true
+  }
+}

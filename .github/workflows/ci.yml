@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  holo-ci-self-test:
+    name: Holo-CI Test & Self-Verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Run holo-ci unit tests
+        run: node --test holo-ci/holo-ci.test.mts
+
+      - name: Verify maintenance-workflows via holo-ci
+        run: node holo-ci/cli.mts verify --config holo-ci.json --emit-summary --receipt holo-ci-receipt.ndjson
+
+      - name: Upload holo-ci receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: holo-ci-receipt
+          path: holo-ci-receipt.ndjson

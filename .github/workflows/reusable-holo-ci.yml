@@ -1,0 +1,69 @@
+name: Reusable Holo-CI Runner (v1)
+
+on:
+  workflow_call:
+    inputs:
+      config-path:
+        description: 'Path to holo-ci.json manifest relative to working-directory'
+        required: false
+        default: 'holo-ci.json'
+        type: string
+      node-version:
+        description: 'Node.js version for erasable-TS execution'
+        required: false
+        default: '24'
+        type: string
+      phase:
+        description: 'Holo-CI phase to execute (verify|sync|bump|pack|telemetry|maintain)'
+        required: false
+        default: 'verify'
+        type: string
+      working-directory:
+        description: 'Working directory inside caller repository'
+        required: false
+        default: '.'
+        type: string
+      holo-ci-ref:
+        description: 'Git ref of awesome-os/maintenance-workflows to check out'
+        required: false
+        default: 'v1'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  holo-ci:
+    name: Holo-CI (${{ inputs.phase }})
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+
+      - name: Checkout holo-ci runtime
+        uses: actions/checkout@v4
+        with:
+          repository: awesome-os/maintenance-workflows
+          ref: ${{ inputs.holo-ci-ref }}
+          path: .holo-ci-runtime
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Run holo-ci (${{ inputs.phase }})
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          node "${{ github.workspace }}/.holo-ci-runtime/holo-ci/cli.mts" "${{ inputs.phase }}" \
+            --config "${{ inputs.config-path }}" \
+            --emit-summary \
+            --receipt "${{ github.workspace }}/holo-ci-receipt.ndjson"
+
+      - name: Upload holo-ci receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: holo-ci-receipt-${{ inputs.phase }}
+          path: holo-ci-receipt.ndjson
+          if-no-files-found: warn
