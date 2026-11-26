@@ -71,7 +71,7 @@ const PINNED_V11_CPP_LIBS: readonly PinnedV11CppLib[] = [
   {
     name: 'cairo',
     pcName: 'cairo',
-    defaultVersion: '1.18.4',
+    defaultVersion: '1.18.6',
     aptPackage: 'libcairo2',
     aptProvides: ['holo-v11-cairo', 'libcairo-v11'],
     soname: 'libcairo.so.2',
@@ -91,9 +91,20 @@ const PINNED_V11_CPP_LIBS: readonly PinnedV11CppLib[] = [
     description: 'Multipass URL transfer library (Holo v11 CAS)',
   },
   {
+    name: 'freetype',
+    pcName: 'freetype2',
+    defaultVersion: '2.15.0',
+    aptPackage: 'libfreetype6',
+    aptProvides: ['holo-v11-freetype', 'libfreetype-v11'],
+    soname: 'libfreetype.so.6',
+    wingetId: 'AwesomeOS.V11.FreeType',
+    libsFlag: '-lfreetype',
+    description: 'FreeType font rendering engine (Holo v11 CAS)',
+  },
+  {
     name: 'harfbuzz',
     pcName: 'harfbuzz',
-    defaultVersion: '10.2.0',
+    defaultVersion: '15.2.0',
     aptPackage: 'libharfbuzz0b',
     aptProvides: ['holo-v11-harfbuzz', 'libharfbuzz-v11'],
     soname: 'libharfbuzz.so.0',
@@ -126,7 +137,7 @@ const PINNED_V11_CPP_LIBS: readonly PinnedV11CppLib[] = [
   {
     name: 'libgit2',
     pcName: 'libgit2',
-    defaultVersion: '1.9.0',
+    defaultVersion: '1.9.7',
     aptPackage: 'libgit2-1.9',
     aptProvides: ['holo-v11-libgit2', 'libgit2-v11'],
     soname: 'libgit2.so.1.9',
@@ -135,9 +146,20 @@ const PINNED_V11_CPP_LIBS: readonly PinnedV11CppLib[] = [
     description: 'Portable pure-C Git core implementation (Holo v11 CAS)',
   },
   {
+    name: 'libpng',
+    pcName: 'libpng16',
+    defaultVersion: '1.6.59',
+    aptPackage: 'libpng16-16t64',
+    aptProvides: ['libpng16-16', 'holo-v11-libpng'],
+    soname: 'libpng16.so.16',
+    wingetId: 'AwesomeOS.V11.LibPNG',
+    libsFlag: '-lpng16',
+    description: 'Official PNG reference library (Holo v11 CAS)',
+  },
+  {
     name: 'librdkafka',
     pcName: 'rdkafka',
-    defaultVersion: '2.8.0',
+    defaultVersion: '2.16.0',
     aptPackage: 'librdkafka1',
     aptProvides: ['holo-v11-librdkafka', 'librdkafka-v11'],
     soname: 'librdkafka.so.1',
@@ -148,7 +170,7 @@ const PINNED_V11_CPP_LIBS: readonly PinnedV11CppLib[] = [
   {
     name: 'libsodium',
     pcName: 'libsodium',
-    defaultVersion: '1.0.20',
+    defaultVersion: '1.0.22',
     aptPackage: 'libsodium23',
     aptProvides: ['holo-v11-libsodium', 'libsodium-v11'],
     soname: 'libsodium.so.23',
@@ -159,7 +181,7 @@ const PINNED_V11_CPP_LIBS: readonly PinnedV11CppLib[] = [
   {
     name: 'libvips',
     pcName: 'vips',
-    defaultVersion: '8.16.1',
+    defaultVersion: '8.18.7',
     aptPackage: 'libvips42',
     aptProvides: ['holo-v11-libvips', 'libvips-v11'],
     soname: 'libvips.so.42',
@@ -170,7 +192,7 @@ const PINNED_V11_CPP_LIBS: readonly PinnedV11CppLib[] = [
   {
     name: 'libxml2',
     pcName: 'libxml-2.0',
-    defaultVersion: '2.13.8',
+    defaultVersion: '2.15.4',
     aptPackage: 'libxml2',
     aptProvides: ['holo-v11-libxml2', 'libxml2-v11'],
     soname: 'libxml2.so.2',
@@ -181,7 +203,7 @@ const PINNED_V11_CPP_LIBS: readonly PinnedV11CppLib[] = [
   {
     name: 'libxslt',
     pcName: 'libxslt',
-    defaultVersion: '1.1.43',
+    defaultVersion: '1.1.45',
     aptPackage: 'libxslt1.1',
     aptProvides: ['holo-v11-libxslt', 'libxslt-v11'],
     soname: 'libxslt.so.1',
@@ -192,7 +214,7 @@ const PINNED_V11_CPP_LIBS: readonly PinnedV11CppLib[] = [
   {
     name: 'libzip',
     pcName: 'libzip',
-    defaultVersion: '1.11.3',
+    defaultVersion: '1.12.1',
     aptPackage: 'libzip5',
     aptProvides: ['holo-v11-libzip', 'libzip-v11'],
     soname: 'libzip.so.5',
@@ -225,7 +247,7 @@ const PINNED_V11_CPP_LIBS: readonly PinnedV11CppLib[] = [
   {
     name: 'pixman',
     pcName: 'pixman-1',
-    defaultVersion: '0.46.0',
+    defaultVersion: '0.46.4',
     aptPackage: 'libpixman-1-0',
     aptProvides: ['holo-v11-pixman', 'libpixman-v11'],
     soname: 'libpixman-1.so.0',
@@ -245,9 +267,20 @@ const PINNED_V11_CPP_LIBS: readonly PinnedV11CppLib[] = [
     description: 'Self-contained serverless SQL database engine (Holo v11 CAS)',
   },
   {
+    name: 'zlib',
+    pcName: 'zlib',
+    defaultVersion: '1.4',
+    aptPackage: 'zlib1g',
+    aptProvides: ['holo-v11-zlib', 'zlib-v11'],
+    soname: 'libz.so.1',
+    wingetId: 'AwesomeOS.V11.Zlib',
+    libsFlag: '-lz',
+    description: 'General-purpose lossless data-compression library (Holo v11 CAS)',
+  },
+  {
     name: 'zstd',
     pcName: 'libzstd',
-    defaultVersion: '1.5.7',
+    defaultVersion: '1.6.0',
     aptPackage: 'libzstd1',
     aptProvides: ['holo-v11-zstd', 'libzstd-v11'],
     soname: 'libzstd.so.1',
@@ -418,6 +451,8 @@ function loadMaxVersionOverrides(cwd: string, maxLockPath?: string): Map<string,
         resolve(cwd, 'max-version-lock.json'),
         resolve(cwd, 'catalog', 'max-version-lock.json'),
         resolve(cwd, 'reports', 'max-version-lock.json'),
+        resolve(cwd, '../t2linux-baseline/catalog/max-version-lock.json'),
+        resolve(cwd, '../../t2linux-baseline/catalog/max-version-lock.json'),
       ];
 
   const found = candidates.find((p) => existsSync(p));
@@ -1498,8 +1533,8 @@ function synthesizeRubygemsCompat(
         libxsltSoname: libByName.get('libxslt')?.soname ?? 'libxslt.so.1',
         libraries: ['libxml2', 'libxslt'],
         versions: {
-          libxml2: libByName.get('libxml2')?.version ?? '2.13.8',
-          libxslt: libByName.get('libxslt')?.version ?? '1.1.43',
+          libxml2: libByName.get('libxml2')?.version ?? '2.15.4',
+          libxslt: libByName.get('libxslt')?.version ?? '1.1.45',
         },
         holoCasStore: 'v11',
       },
@@ -1527,7 +1562,7 @@ function synthesizeRubygemsCompat(
       {
         soname: libByName.get('libsodium')?.soname ?? 'libsodium.so.23',
         libraries: ['libsodium'],
-        versions: { libsodium: libByName.get('libsodium')?.version ?? '1.0.20' },
+        versions: { libsodium: libByName.get('libsodium')?.version ?? '1.0.22' },
         holoCasStore: 'v11',
       },
     ],
@@ -1536,7 +1571,7 @@ function synthesizeRubygemsCompat(
       {
         soname: libByName.get('librdkafka')?.soname ?? 'librdkafka.so.1',
         libraries: ['librdkafka'],
-        versions: { librdkafka: libByName.get('librdkafka')?.version ?? '2.8.0' },
+        versions: { librdkafka: libByName.get('librdkafka')?.version ?? '2.16.0' },
         holoCasStore: 'v11',
       },
     ],
@@ -1545,7 +1580,7 @@ function synthesizeRubygemsCompat(
       {
         soname: libByName.get('libvips')?.soname ?? 'libvips.so.42',
         libraries: ['libvips'],
-        versions: { libvips: libByName.get('libvips')?.version ?? '8.16.1' },
+        versions: { libvips: libByName.get('libvips')?.version ?? '8.18.7' },
         holoCasStore: 'v11',
       },
     ],
@@ -1554,7 +1589,7 @@ function synthesizeRubygemsCompat(
       {
         soname: libByName.get('libgit2')?.soname ?? 'libgit2.so.1.9',
         libraries: ['libgit2'],
-        versions: { libgit2: libByName.get('libgit2')?.version ?? '1.9.0' },
+        versions: { libgit2: libByName.get('libgit2')?.version ?? '1.9.7' },
         holoCasStore: 'v11',
       },
     ],

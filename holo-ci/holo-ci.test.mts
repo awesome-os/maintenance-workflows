@@ -857,7 +857,7 @@ describe('holo-ci lock-compat', () => {
       const phpIni = readFileSync(join(outBase, 'php.holo-v11.ini'), 'utf8');
       assert.match(phpIni, /extension_dir = "\/var\/lib\/b8g\/cas\/v11\/php\/ext"/);
       assert.match(phpIni, /v11-pin\.oniguruma = "6\.9\.10" ; libonig\.so\.5/);
-      assert.match(phpIni, /v11-pin\.libsodium = "1\.0\.20" ; libsodium\.so\.23/);
+      assert.match(phpIni, /v11-pin\.libsodium = "1\.0\.22" ; libsodium\.so\.23/);
 
       const wpEnv = JSON.parse(readFileSync(join(outBase, 'wp-env.holo-v11.json'), 'utf8')) as {
         runtime: string;
@@ -982,6 +982,82 @@ describe('holo-ci lock-compat', () => {
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses synced 68/68 max-version defaults and auto-discovers sibling t2linux-baseline max-version-lock.json', () => {
+    const root = makeTempDir('holo-ci-sibling-lock-');
+    try {
+      const repoA = join(root, 'repo-a');
+      const nestedRepo = join(root, 'group', 'repo-b');
+      const isolated = join(root, 'isolated');
+      mkdirSync(repoA, { recursive: true });
+      mkdirSync(nestedRepo, { recursive: true });
+      mkdirSync(isolated, { recursive: true });
+
+      // Without max-version-lock.json, fallback defaults must match all 20 synced 68/68 max versions
+      const fallbackRes = runLockCompat({ cwd: isolated, ecosystem: 'vcpkg', outDir: 'out' });
+      assert.equal(fallbackRes.ok, true);
+      const vcpkgFallback = JSON.parse(readFileSync(join(isolated, 'out', 'vcpkg-configuration.json'), 'utf8')) as {
+        pinnedLibraries: Record<string, { version: string }>;
+      };
+      const expectedDefaults: Record<string, string> = {
+        cairo: '1.18.6',
+        harfbuzz: '15.2.0',
+        libxml2: '2.15.4',
+        libxslt: '1.1.45',
+        zstd: '1.6.0',
+        zlib: '1.4',
+        sqlite: '3.54.1',
+        curl: '8.23.0',
+        icu4c: '79.1',
+        oniguruma: '6.9.10',
+        libgit2: '1.9.7',
+        librdkafka: '2.16.0',
+        libvips: '8.18.7',
+        freetype: '2.15.0',
+        libpng: '1.6.59',
+        pixman: '0.46.4',
+        openssl: '4.1.0',
+        libsodium: '1.0.22',
+        libgd: '2.3.3',
+        libzip: '1.12.1',
+      };
+      assert.equal(Object.keys(vcpkgFallback.pinnedLibraries).length, 20);
+      for (const [lib, ver] of Object.entries(expectedDefaults)) {
+        assert.equal(vcpkgFallback.pinnedLibraries[lib]?.version, ver, `mismatch for ${lib}`);
+      }
+
+      // Sibling ../t2linux-baseline/catalog/max-version-lock.json & ../../t2linux-baseline/catalog/max-version-lock.json
+      const t2Catalog = join(root, 't2linux-baseline', 'catalog');
+      mkdirSync(t2Catalog, { recursive: true });
+      writeFileSync(
+        join(t2Catalog, 'max-version-lock.json'),
+        JSON.stringify({
+          schema: 'awesome-os.max-version-lock.v1',
+          libraries: [
+            { name: 'openssl', v11Name: 'openssl', maxVersion: '4.1.9' },
+            { name: 'zstd', v11Name: 'zstd', maxVersion: '1.6.9' },
+          ],
+        }),
+        'utf8',
+      );
+
+      runLockCompat({ cwd: repoA, ecosystem: 'vcpkg', outDir: 'out-1' });
+      const vcpkgOneUp = JSON.parse(readFileSync(join(repoA, 'out-1', 'vcpkg-configuration.json'), 'utf8')) as {
+        pinnedLibraries: Record<string, { version: string }>;
+      };
+      assert.equal(vcpkgOneUp.pinnedLibraries.openssl.version, '4.1.9');
+      assert.equal(vcpkgOneUp.pinnedLibraries.zstd.version, '1.6.9');
+
+      runLockCompat({ cwd: nestedRepo, ecosystem: 'vcpkg', outDir: 'out-2' });
+      const vcpkgTwoUp = JSON.parse(readFileSync(join(nestedRepo, 'out-2', 'vcpkg-configuration.json'), 'utf8')) as {
+        pinnedLibraries: Record<string, { version: string }>;
+      };
+      assert.equal(vcpkgTwoUp.pinnedLibraries.openssl.version, '4.1.9');
+      assert.equal(vcpkgTwoUp.pinnedLibraries.zstd.version, '1.6.9');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

@@ -1,0 +1,108 @@
+name: Reusable Holo-E2E Runner (v1)
+
+on:
+  workflow_call:
+    inputs:
+      config-path:
+        description: 'Path to holo-ci.json manifest relative to working-directory'
+        required: false
+        default: 'holo-ci.json'
+        type: string
+      e2e-command:
+        description: 'Optional E2E command executed inside working-directory'
+        required: false
+        default: ''
+        type: string
+      working-directory:
+        description: 'Working directory inside caller repository'
+        required: false
+        default: '.'
+        type: string
+      holo-ci-ref:
+        description: 'Git ref of awesome-os/maintenance-workflows to check out'
+        required: false
+        default: 'v1'
+        type: string
+      runner-image:
+        description: 'Container image for offscreen Lavapipe + Zero-X11 E2E runs'
+        required: false
+        default: 'ghcr.io/awesome-os/holo-e2e-runner:latest'
+        type: string
+      artifacts-path:
+        description: 'Artifacts directory relative to github.workspace'
+        required: false
+        default: 'holo-e2e-artifacts'
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  holo-e2e:
+    name: Holo-E2E (Lavapipe Zero-X11)
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ inputs.runner-image }}
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+
+      - name: Checkout holo-ci runtime
+        uses: actions/checkout@v4
+        with:
+          repository: awesome-os/maintenance-workflows
+          ref: ${{ inputs.holo-ci-ref }}
+          path: .holo-ci-runtime
+
+      - name: Run offscreen Lavapipe & Zero-X11 BMP probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ github.workspace }}/${{ inputs.artifacts-path }}"
+          PROBE_JSON="$(/usr/local/bin/holo-e2e-probe --out "${{ github.workspace }}/${{ inputs.artifacts-path }}/offscreen-probe.bmp")"
+          echo "$PROBE_JSON" > "${{ github.workspace }}/${{ inputs.artifacts-path }}/offscreen-probe.json"
+          {
+            echo "### Holo-E2E Offscreen Lavapipe + Zero-X11 Probe"
+            echo ""
+            echo "- **Runner Image:** \`${{ inputs.runner-image }}\`"
+            echo "- **Artifacts Directory:** \`${{ inputs.artifacts-path }}\`"
+            echo "- **BMP Probe Output:** \`offscreen-probe.bmp\`"
+            echo ""
+            echo '```json'
+            printf '%s\n' "$PROBE_JSON"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run holo-ci verify
+        working-directory: ${{ inputs.working-directory }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          node "${{ github.workspace }}/.holo-ci-runtime/holo-ci/cli.mts" verify \
+            --config "${{ inputs.config-path }}" \
+            --emit-summary \
+            --receipt "${{ github.workspace }}/${{ inputs.artifacts-path }}/holo-e2e-receipt.ndjson"
+
+      - name: Execute E2E command
+        if: inputs.e2e-command != ''
+        working-directory: ${{ inputs.working-directory }}
+        shell: bash
+        env:
+          E2E_CMD: ${{ inputs.e2e-command }}
+          HOLO_E2E_ARTIFACTS: ${{ github.workspace }}/${{ inputs.artifacts-path }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          bash -euo pipefail -c "$E2E_CMD"
+
+      - name: Upload holo-e2e artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: holo-e2e-artifacts
+          path: ${{ inputs.artifacts-path }}
+          if-no-files-found: warn
