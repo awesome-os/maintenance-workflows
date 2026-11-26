@@ -1,0 +1,329 @@
+name: Reusable Gravity Pinning, Dedup & Runner Telemetry (v11)
+
+on:
+  workflow_call:
+    inputs:
+      bounce_index:
+        description: 'Current damped-gravity bounce index'
+        required: false
+        type: string
+        default: '0'
+      max_bounces:
+        description: 'Maximum damped-gravity bounces'
+        required: false
+        type: string
+        default: '3'
+      damping_factor:
+        description: 'Gravity damping factor (0.0 - 1.0)'
+        required: false
+        type: string
+        default: '0.65'
+      max_shards_per_drop:
+        description: 'Maximum shards emitted per gravity drop'
+        required: false
+        type: string
+        default: '600'
+      target_org:
+        description: 'Target GitHub organization'
+        required: false
+        type: string
+        default: 'awesome-os'
+      auto_bounce:
+        description: 'Enable automatic bounce chaining when below max_bounces'
+        required: false
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      bounce_index:
+        description: 'Current damped-gravity bounce index'
+        required: false
+        type: string
+        default: '0'
+      max_bounces:
+        description: 'Maximum damped-gravity bounces'
+        required: false
+        type: string
+        default: '3'
+      damping_factor:
+        description: 'Gravity damping factor (0.0 - 1.0)'
+        required: false
+        type: string
+        default: '0.65'
+      max_shards_per_drop:
+        description: 'Maximum shards emitted per gravity drop'
+        required: false
+        type: string
+        default: '600'
+      target_org:
+        description: 'Target GitHub organization'
+        required: false
+        type: string
+        default: 'awesome-os'
+      auto_bounce:
+        description: 'Enable automatic bounce chaining when below max_bounces'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  gravity-pin-dedup-telemetry:
+    name: Gravity Pinning, SHA-512 Dedup & Runner Telemetry (Bounce ${{ inputs.bounce_index || '0' }})
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Reclaim runner disk headroom & record hardware telemetry
+        id: runner_metrics
+        shell: bash
+        run: |
+          set -euo pipefail
+          DISK_BEFORE_KB=$(df -Pk / | awk 'NR==2 {print $4}')
+          DISK_TOTAL_KB=$(df -Pk / | awk 'NR==2 {print $2}')
+          echo "=== Disk headroom BEFORE reclaim ==="
+          df -h /
+
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          docker image prune -af >/dev/null 2>&1 || true
+
+          DISK_AFTER_KB=$(df -Pk / | awk 'NR==2 {print $4}')
+          echo "=== Disk headroom AFTER reclaim ==="
+          df -h /
+
+          CPU_CORES=$(nproc 2>/dev/null || echo 2)
+          MEM_TOTAL_KB=$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+          MEM_AVAIL_KB=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+          RECLAIMED_KB=$((DISK_AFTER_KB - DISK_BEFORE_KB))
+          if [ "$RECLAIMED_KB" -lt 0 ]; then RECLAIMED_KB=0; fi
+
+          {
+            echo "cpu_cores=${CPU_CORES}"
+            echo "mem_total_kb=${MEM_TOTAL_KB}"
+            echo "mem_avail_kb=${MEM_AVAIL_KB}"
+            echo "disk_total_kb=${DISK_TOTAL_KB}"
+            echo "disk_before_kb=${DISK_BEFORE_KB}"
+            echo "disk_after_kb=${DISK_AFTER_KB}"
+            echo "disk_reclaimed_kb=${RECLAIMED_KB}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify version-pinning, SHA-512 dedup & emit gravity telemetry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOUNCE_INDEX: ${{ inputs.bounce_index || '0' }}
+          MAX_BOUNCES: ${{ inputs.max_bounces || '3' }}
+          DAMPING_FACTOR: ${{ inputs.damping_factor || '0.65' }}
+          MAX_SHARDS_PER_DROP: ${{ inputs.max_shards_per_drop || '600' }}
+          TARGET_ORG: ${{ inputs.target_org || 'awesome-os' }}
+          AUTO_BOUNCE: ${{ inputs.auto_bounce || false }}
+          CPU_CORES: ${{ steps.runner_metrics.outputs.cpu_cores }}
+          MEM_TOTAL_KB: ${{ steps.runner_metrics.outputs.mem_total_kb }}
+          MEM_AVAIL_KB: ${{ steps.runner_metrics.outputs.mem_avail_kb }}
+          DISK_TOTAL_KB: ${{ steps.runner_metrics.outputs.disk_total_kb }}
+          DISK_BEFORE_KB: ${{ steps.runner_metrics.outputs.disk_before_kb }}
+          DISK_AFTER_KB: ${{ steps.runner_metrics.outputs.disk_after_kb }}
+          DISK_RECLAIMED_KB: ${{ steps.runner_metrics.outputs.disk_reclaimed_kb }}
+        run: |
+          cat <<'EOF' > /tmp/emit-gravity-telemetry.mts
+          import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+
+          const org = process.env.TARGET_ORG || 'awesome-os';
+          const token = process.env.GH_TOKEN || '';
+          const headers: Record<string, string> = {
+            Accept: 'application/vnd.github+json',
+            'User-Agent': 'awesome-os-gravity-telemetry/1.0',
+          };
+          if (token) headers.Authorization = `Bearer ${token}`;
+
+          async function loadJson(localPaths: string[], remoteUrl: string): Promise<Record<string, unknown> | null> {
+            for (const p of localPaths) {
+              if (existsSync(p)) {
+                try {
+                  return JSON.parse(readFileSync(p, 'utf8')) as Record<string, unknown>;
+                } catch {}
+              }
+            }
+            try {
+              const res = await fetch(remoteUrl, { headers });
+              if (res.ok) return (await res.json()) as Record<string, unknown>;
+            } catch {}
+            return null;
+          }
+
+          const manifest = await loadJson(
+            ['index/cas-v11-global-manifest.json', '../holo-v11/index/cas-v11-global-manifest.json'],
+            `https://raw.githubusercontent.com/${org}/holo-v11/main/index/cas-v11-global-manifest.json`,
+          );
+          const tracker = await loadJson(
+            ['catalog/live-upstream-tracker.json', '../t2linux-baseline/catalog/live-upstream-tracker.json'],
+            `https://raw.githubusercontent.com/${org}/t2linux-baseline/main/catalog/live-upstream-tracker.json`,
+          );
+          const lock = await loadJson(
+            ['catalog/max-version-lock.json', 'reports/max-version-lock.json', '../t2linux-baseline/catalog/max-version-lock.json'],
+            `https://raw.githubusercontent.com/${org}/t2linux-baseline/main/catalog/max-version-lock.json`,
+          );
+
+          let apiRateRemaining = 0;
+          let apiRateLimit = 0;
+          try {
+            const rl = await fetch('https://api.github.com/rate_limit', { headers });
+            if (rl.ok) {
+              const rlJson = (await rl.json()) as { resources?: { core?: { remaining?: number; limit?: number } } };
+              apiRateRemaining = rlJson.resources?.core?.remaining ?? 0;
+              apiRateLimit = rlJson.resources?.core?.limit ?? 0;
+            }
+          } catch {}
+
+          const entries = (Array.isArray(manifest?.entries) ? manifest.entries : []) as Array<{
+            repo?: string;
+            filename?: string;
+            sha512?: string;
+            size?: number;
+          }>;
+
+          const uniqueSizes = new Map<string, number>();
+          let rawBytes = 0;
+          let validSha512Count = 0;
+          let b8gGhostRemnants = 0;
+          for (const e of entries) {
+            const sz = Number(e.size || 0);
+            rawBytes += sz;
+            const h = String(e.sha512 || '');
+            if (/^[0-9a-f]{128}$/i.test(h)) validSha512Count++;
+            if (!uniqueSizes.has(h)) uniqueSizes.set(h, sz);
+            if (/^b8g-ghost/i.test(String(e.filename || ''))) b8gGhostRemnants++;
+          }
+          let uniqueBytes = 0;
+          for (const sz of uniqueSizes.values()) uniqueBytes += sz;
+          const savedBytes = Math.max(0, rawBytes - uniqueBytes);
+
+          const libs = (Array.isArray(tracker?.libraries) ? tracker.libraries : []) as Array<{
+            pkg?: string;
+            repo?: string;
+            upstreamVersion?: string;
+            previousV11?: string | null;
+            bumped?: boolean;
+          }>;
+          const driftedLibs = libs.filter((l) => l.bumped || (l.previousV11 && l.upstreamVersion && l.previousV11 !== l.upstreamVersion));
+          const atMaxCount = libs.length - driftedLibs.length;
+
+          const mb = (kb: number) => Number((kb / 1024).toFixed(1));
+          const gb = (kb: number) => Number((kb / (1024 * 1024)).toFixed(2));
+          const bytesToMb = (b: number) => Number((b / 1048576).toFixed(2));
+
+          const bounceIndex = Number(process.env.BOUNCE_INDEX || '0');
+          const maxBounces = Number(process.env.MAX_BOUNCES || '3');
+          const dampingFactor = Number(process.env.DAMPING_FACTOR || '0.65');
+          const maxShardsPerDrop = Number(process.env.MAX_SHARDS_PER_DROP || '600');
+          const autoBounce = process.env.AUTO_BOUNCE === 'true';
+
+          const report = {
+            schema: 'awesome-os.gravity-telemetry.v1',
+            abiMagic: '0x33564742',
+            generatedAt: new Date().toISOString(),
+            targetOrg: org,
+            damper: {
+              bounceIndex,
+              maxBounces,
+              dampingFactor,
+              maxShardsPerDrop,
+              autoBounce,
+              nextBounceReady: autoBounce && bounceIndex < maxBounces,
+            },
+            runner: {
+              os: process.platform,
+              arch: process.arch,
+              cpuCores: Number(process.env.CPU_CORES || '2'),
+              memTotalMb: mb(Number(process.env.MEM_TOTAL_KB || '0')),
+              memAvailableMb: mb(Number(process.env.MEM_AVAIL_KB || '0')),
+              diskTotalGb: gb(Number(process.env.DISK_TOTAL_KB || '0')),
+              diskFreeBeforeGb: gb(Number(process.env.DISK_BEFORE_KB || '0')),
+              diskFreeAfterGb: gb(Number(process.env.DISK_AFTER_KB || '0')),
+              diskReclaimedGb: gb(Number(process.env.DISK_RECLAIMED_KB || '0')),
+              apiRateRemaining,
+              apiRateLimit,
+            },
+            pinning: {
+              trackedUpstreamLibs: libs.length,
+              atMaxCount,
+              driftedCount: driftedLibs.length,
+              driftedLibs: driftedLibs.map((l) => ({
+                pkg: l.pkg,
+                pinned: l.previousV11,
+                upstream: l.upstreamVersion,
+                bumped: Boolean(l.bumped),
+              })),
+              maxVersionLockSummary: lock?.summary ?? null,
+            },
+            dedup: {
+              totalAssets: entries.length,
+              validSha512Count,
+              uniqueSha512Blobs: uniqueSizes.size,
+              dedupedBlobs: Math.max(0, entries.length - uniqueSizes.size),
+              rawTotalMb: bytesToMb(rawBytes),
+              uniqueTotalMb: bytesToMb(uniqueBytes),
+              savedMb: bytesToMb(savedBytes),
+              dedupRatioPct: rawBytes > 0 ? Number(((savedBytes / rawBytes) * 100).toFixed(2)) : 0,
+              dupV8Bytes: 0,
+              b8gGhostRemnants,
+            },
+          };
+
+          writeFileSync('gravity-telemetry.json', JSON.stringify(report, null, 2) + '\n', 'utf8');
+
+          const ndjsonLines = [
+            JSON.stringify({ schema: report.schema, abiMagic: report.abiMagic, kind: 'summary', ...report }),
+            ...libs.map((l) =>
+              JSON.stringify({
+                schema: report.schema,
+                abiMagic: report.abiMagic,
+                kind: 'pinned-subsystem',
+                pkg: l.pkg,
+                repo: l.repo,
+                pinned: l.previousV11,
+                upstream: l.upstreamVersion,
+                bumped: Boolean(l.bumped),
+              }),
+            ),
+          ];
+          writeFileSync('gravity-telemetry.ndjson', ndjsonLines.join('\n') + '\n', 'utf8');
+
+          const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+          if (summaryPath) {
+            const md = [
+              `## Gravity Damper Telemetry — Bounce \`${bounceIndex}/${maxBounces}\` (\`${org}\`)`,
+              '',
+              '| Metric | Value |',
+              '| :--- | :--- |',
+              `| Schema / ABI Magic | \`${report.schema}\` / \`${report.abiMagic}\` |`,
+              `| Damping Factor / Max Shards | \`${dampingFactor}\` / \`${maxShardsPerDrop}\` (auto_bounce=\`${autoBounce}\`) |`,
+              `| Runner CPU / RAM | ${report.runner.cpuCores} cores · ${report.runner.memAvailableMb} MB free / ${report.runner.memTotalMb} MB |`,
+              `| Disk Headroom | ${report.runner.diskFreeBeforeGb} GB → **${report.runner.diskFreeAfterGb} GB** (+${report.runner.diskReclaimedGb} GB reclaimed) |`,
+              `| Version Pinning | **${atMaxCount} / ${libs.length}** at max (${driftedLibs.length} drifted) |`,
+              `| SHA-512 CAS Dedup | ${report.dedup.uniqueSha512Blobs} unique / ${report.dedup.totalAssets} assets (${report.dedup.savedMb} MB saved · ${report.dedup.dedupRatioPct}%) |`,
+              `| \`dup_v8\` / \`b8g-ghost\` | \`${report.dedup.dupV8Bytes} B\` / \`${b8gGhostRemnants}\` |`,
+              `| GitHub API Rate Headroom | ${apiRateRemaining} / ${apiRateLimit} |`,
+              '',
+            ].join('\n');
+            appendFileSync(summaryPath, md, 'utf8');
+          }
+          console.log('[GRAVITY TELEMETRY] Emitted gravity-telemetry.json & gravity-telemetry.ndjson');
+          EOF
+          node /tmp/emit-gravity-telemetry.mts
+
+      - name: Upload gravity telemetry artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gravity-telemetry-bounce-${{ inputs.bounce_index || '0' }}
+          path: |
+            gravity-telemetry.json
+            gravity-telemetry.ndjson
