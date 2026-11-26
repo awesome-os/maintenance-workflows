@@ -474,11 +474,13 @@ describe('holo-ci lock-compat', () => {
     }
   });
 
-  it('projects all 7 ecosystems via --ecosystem all into outDir without mutating host stores', () => {
-    const dir = makeTempDir('holo-ci-lock-7eco-');
+  it('projects all 9 ecosystems via --ecosystem all into outDir without mutating host stores', () => {
+    const dir = makeTempDir('holo-ci-lock-9eco-');
     try {
       mkdirSync(join(dir, 'node_modules', '.sentinel'), { recursive: true });
       writeFileSync(join(dir, 'node_modules', '.sentinel', 'keep.txt'), 'untouched', 'utf8');
+      mkdirSync(join(dir, 'vendor', '.sentinel'), { recursive: true });
+      writeFileSync(join(dir, 'vendor', '.sentinel', 'keep.txt'), 'untouched-vendor', 'utf8');
       writeFileSync(
         join(dir, 'package.json'),
         JSON.stringify({ name: 'polyglot-demo', version: '3.1.0', dependencies: { zod: '^3.25.0' } }),
@@ -499,6 +501,7 @@ describe('holo-ci lock-compat', () => {
           libraries: [
             { name: 'openssl', maxVersion: '4.1.0' },
             { name: 'zstd', maxVersion: '1.5.7' },
+            { name: 'curl', maxVersion: '8.23.0' },
           ],
         }),
         'utf8',
@@ -507,7 +510,17 @@ describe('holo-ci lock-compat', () => {
       const res = runLockCompat({ cwd: dir, ecosystem: 'all', outDir: 'dist/locks' });
       assert.equal(res.ok, true);
       assert.equal(res.ecosystem, 'all');
-      assert.deepEqual(res.ecosystemsGenerated, ['npm', 'cargo', 'uv', 'go', 'vcpkg', 'winget', 'apt']);
+      assert.deepEqual(res.ecosystemsGenerated, [
+        'npm',
+        'cargo',
+        'uv',
+        'go',
+        'vcpkg',
+        'winget',
+        'apt',
+        'composer',
+        'rubygems',
+      ]);
       assert.equal(res.written, true);
 
       const outBase = join(dir, 'dist', 'locks');
@@ -542,13 +555,31 @@ describe('holo-ci lock-compat', () => {
       assert.match(goWork, /GOPROXY=file:\/\/\/var\/lib\/b8g\/cas\/v11\/go-proxy,direct/);
       assert.match(goWork, /\t\./);
 
-      // 5. vcpkg + pkg-config stubs for openssl, pixman, cairo, harfbuzz, zstd, libxml2
+      // 5. vcpkg + pkg-config stubs including shared PHP/Ruby C libs
       const vcpkgCfg = JSON.parse(readFileSync(join(outBase, 'vcpkg-configuration.json'), 'utf8')) as {
         holoCasStore: string;
         pinnedLibraries: Record<string, { version: string; pkgConfig: string }>;
       };
       assert.equal(vcpkgCfg.holoCasStore, 'v11');
-      for (const lib of ['openssl', 'pixman', 'cairo', 'harfbuzz', 'zstd', 'libxml2']) {
+      for (const lib of [
+        'openssl',
+        'pixman',
+        'cairo',
+        'harfbuzz',
+        'zstd',
+        'libxml2',
+        'oniguruma',
+        'libxslt',
+        'libgd',
+        'libzip',
+        'libgit2',
+        'librdkafka',
+        'libvips',
+        'icu4c',
+        'libsodium',
+        'sqlite',
+        'curl',
+      ]) {
         assert.ok(vcpkgCfg.pinnedLibraries[lib], `missing vcpkg lib ${lib}`);
         const pcFile = join(outBase, vcpkgCfg.pinnedLibraries[lib].pkgConfig);
         assert.equal(existsSync(pcFile), true, `missing .pc stub for ${lib}`);
@@ -580,9 +611,212 @@ describe('holo-ci lock-compat', () => {
       assert.match(dpkgStatus, /Provides: .*holo-v11-openssl/);
       assert.match(dpkgStatus, /X-Holo-ELF-SONAME: libssl\.so\.3/);
 
-      // Zero mutation of host node_modules or root package-lock.json
+      // 8. composer (clean fallback when composer.json / .wp-env.json are absent)
+      const composerCompat = JSON.parse(readFileSync(join(outBase, 'composer.holo-v11.json'), 'utf8')) as {
+        schema: string;
+        abiMagic: string;
+        config: { 'cache-dir': string; 'preferred-install': string; 'sort-packages': boolean };
+      };
+      assert.equal(composerCompat.schema, 'holo-v11.composer-compat.v1');
+      assert.equal(composerCompat.abiMagic, B8G_ABI_MAGIC_V3);
+      assert.equal(composerCompat.config['cache-dir'], '/var/lib/b8g/cas/v11/composer');
+      assert.equal(existsSync(join(outBase, 'php.holo-v11.ini')), true);
+      assert.equal(existsSync(join(outBase, 'wp-env.holo-v11.json')), true);
+
+      // 9. rubygems
+      assert.equal(existsSync(join(outBase, '.bundle', 'config.holo-v11')), true);
+      const rubygemsCompat = JSON.parse(readFileSync(join(outBase, 'holo-rubygems-compat.json'), 'utf8')) as {
+        schema: string;
+        abiMagic: string;
+        rubyWasm: { runtime: string; wasiHost: string };
+      };
+      assert.equal(rubygemsCompat.schema, 'holo-v11.rubygems-compat.v1');
+      assert.equal(rubygemsCompat.abiMagic, B8G_ABI_MAGIC_V3);
+      assert.equal(rubygemsCompat.rubyWasm.runtime, 'ruby.wasm');
+
+      // Zero mutation of host node_modules, vendor, or root package-lock.json
       assert.equal(readFileSync(join(dir, 'node_modules', '.sentinel', 'keep.txt'), 'utf8'), 'untouched');
+      assert.equal(readFileSync(join(dir, 'vendor', '.sentinel', 'keep.txt'), 'utf8'), 'untouched-vendor');
       assert.equal(existsSync(join(dir, 'package-lock.json')), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('projects composer (PHP native + PHP-WASI @wp/env) without mutating vendor/', () => {
+    const dir = makeTempDir('holo-ci-composer-');
+    try {
+      mkdirSync(join(dir, 'vendor', '.sentinel'), { recursive: true });
+      writeFileSync(join(dir, 'vendor', '.sentinel', 'keep.txt'), 'untouched-vendor', 'utf8');
+      writeFileSync(
+        join(dir, 'composer.json'),
+        JSON.stringify(
+          {
+            name: 'awesome-os/wp-studio',
+            version: '2.4.0',
+            require: { php: '^8.4', 'monolog/monolog': '^3.8' },
+            'require-dev': { 'phpunit/phpunit': '^11.5' },
+          },
+          null,
+          2,
+        ),
+        'utf8',
+      );
+      writeFileSync(
+        join(dir, 'composer.lock'),
+        JSON.stringify({
+          packages: [{ name: 'monolog/monolog', version: '3.8.1', dist: { shasum: 'abc123' } }],
+          'packages-dev': [{ name: 'phpunit/phpunit', version: '11.5.3' }],
+        }),
+        'utf8',
+      );
+      writeFileSync(
+        join(dir, '.wp-env.json'),
+        JSON.stringify({
+          core: 'WordPress/WordPress#6.7',
+          phpVersion: '8.4',
+          plugins: ['.'],
+        }),
+        'utf8',
+      );
+
+      const res = runLockCompat({ cwd: dir, ecosystem: 'composer', outDir: 'dist/php' });
+      assert.equal(res.ok, true);
+      assert.deepEqual(res.ecosystemsGenerated, ['composer']);
+      assert.equal(res.artifacts.length, 3);
+
+      const outBase = join(dir, 'dist', 'php');
+      const composerCfg = JSON.parse(readFileSync(join(outBase, 'composer.holo-v11.json'), 'utf8')) as {
+        schema: string;
+        abiMagic: string;
+        zeroVendorMutation: boolean;
+        name: string;
+        version: string;
+        config: { 'cache-dir': string; 'preferred-install': string; 'sort-packages': boolean };
+        repositories: Array<{ type: string; url: string; options: { symlink: boolean } }>;
+        packages: Array<{ name: string; version: string; dev: boolean; distShasum?: string }>;
+      };
+      assert.equal(composerCfg.schema, 'holo-v11.composer-compat.v1');
+      assert.equal(composerCfg.abiMagic, B8G_ABI_MAGIC_V3);
+      assert.equal(composerCfg.zeroVendorMutation, true);
+      assert.equal(composerCfg.name, 'awesome-os/wp-studio');
+      assert.equal(composerCfg.config['cache-dir'], '/var/lib/b8g/cas/v11/composer');
+      assert.equal(composerCfg.config['preferred-install'], 'dist');
+      assert.equal(composerCfg.config['sort-packages'], true);
+      assert.equal(composerCfg.repositories[0].options.symlink, true);
+      assert.equal(composerCfg.packages.length, 2);
+      assert.equal(composerCfg.packages[0].name, 'monolog/monolog');
+      assert.equal(composerCfg.packages[0].version, '3.8.1');
+      assert.equal(composerCfg.packages[0].distShasum, 'abc123');
+
+      const phpIni = readFileSync(join(outBase, 'php.holo-v11.ini'), 'utf8');
+      assert.match(phpIni, /extension_dir = "\/var\/lib\/b8g\/cas\/v11\/php\/ext"/);
+      assert.match(phpIni, /v11-pin\.oniguruma = "6\.9\.10" ; libonig\.so\.5/);
+      assert.match(phpIni, /v11-pin\.libsodium = "1\.0\.20" ; libsodium\.so\.23/);
+
+      const wpEnv = JSON.parse(readFileSync(join(outBase, 'wp-env.holo-v11.json'), 'utf8')) as {
+        runtime: string;
+        dbEngine: string;
+        casRoot: string;
+        wasiHost: string;
+        core: string;
+        plugins: string[];
+      };
+      assert.equal(wpEnv.runtime, 'php-wasi');
+      assert.equal(wpEnv.dbEngine, 'sqlite-wasi');
+      assert.equal(wpEnv.casRoot, '/var/lib/b8g/cas/v11');
+      assert.equal(wpEnv.wasiHost, 'holo-wasi-host-b8g.wasm');
+      assert.equal(wpEnv.core, 'WordPress/WordPress#6.7');
+      assert.deepEqual(wpEnv.plugins, ['.']);
+
+      assert.equal(readFileSync(join(dir, 'vendor', '.sentinel', 'keep.txt'), 'utf8'), 'untouched-vendor');
+      assert.equal(existsSync(join(dir, 'composer.holo-v11.json')), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('projects rubygems (Ruby native + ruby.wasm WASI) without mutating host stores', () => {
+    const dir = makeTempDir('holo-ci-rubygems-');
+    try {
+      writeFileSync(
+        join(dir, 'Gemfile'),
+        ["source 'https://rubygems.org'", "ruby '3.4.2'", "gem 'nokogiri', '~> 1.18'", "gem 'ffi', '~> 1.17'"].join(
+          '\n',
+        ),
+        'utf8',
+      );
+      writeFileSync(
+        join(dir, 'Gemfile.lock'),
+        [
+          'GEM',
+          '  remote: https://rubygems.org/',
+          '  specs:',
+          '    ffi (1.17.1-x86_64-linux)',
+          '    nokogiri (1.18.4)',
+          '    sqlite3 (2.6.0)',
+          '',
+          'RUBY VERSION',
+          '   ruby 3.4.2p28',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+      writeFileSync(
+        join(dir, 'awesome-ruby.gemspec'),
+        [
+          'Gem::Specification.new do |spec|',
+          '  spec.name = "awesome-ruby"',
+          '  spec.version = "0.9.0"',
+          '  spec.add_runtime_dependency "rdkafka", "~> 0.21"',
+          'end',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const res = runLockCompat({ cwd: dir, ecosystem: 'rubygems', outDir: 'dist/ruby' });
+      assert.equal(res.ok, true);
+      assert.deepEqual(res.ecosystemsGenerated, ['rubygems']);
+      assert.equal(res.artifacts.length, 2);
+
+      const outBase = join(dir, 'dist', 'ruby');
+      const bundleCfg = readFileSync(join(outBase, '.bundle', 'config.holo-v11'), 'utf8');
+      assert.match(bundleCfg, /BUNDLE_CACHE_PATH: "\/var\/lib\/b8g\/cas\/v11\/gems"/);
+      assert.match(bundleCfg, /BUNDLE_LOCAL: "true"/);
+      assert.match(bundleCfg, /BUNDLE_DEPLOYMENT: "true"/);
+      assert.match(bundleCfg, /BUNDLE_BUILD__NOKOGIRI: "--use-system-libraries"/);
+      assert.match(bundleCfg, /BUNDLE_BUILD__PSYCH: "--with-libyaml-dir=\/var\/lib\/b8g\/cas\/v11"/);
+      assert.match(bundleCfg, /BUNDLE_BUILD__FFI: "--enable-system-libffi"/);
+      assert.match(bundleCfg, /BUNDLE_BUILD__SQLITE3: "--enable-system-libraries"/);
+      assert.match(bundleCfg, /BUNDLE_BUILD__OPENSSL: "--with-openssl-dir=\/var\/lib\/b8g\/cas\/v11"/);
+
+      const compat = JSON.parse(readFileSync(join(outBase, 'holo-rubygems-compat.json'), 'utf8')) as {
+        schema: string;
+        abiMagic: string;
+        name: string;
+        version: string;
+        zeroHostGemMutation: boolean;
+        rubyWasm: { runtime: string; target: string; wasiHost: string; rubyVersion: string };
+        nativeExtensionSonames: Record<string, { soname: string }>;
+        gems: Array<{ name: string; version: string; soname?: string }>;
+      };
+      assert.equal(compat.schema, 'holo-v11.rubygems-compat.v1');
+      assert.equal(compat.abiMagic, B8G_ABI_MAGIC_V3);
+      assert.equal(compat.name, 'awesome-ruby');
+      assert.equal(compat.version, '0.9.0');
+      assert.equal(compat.zeroHostGemMutation, true);
+      assert.equal(compat.rubyWasm.runtime, 'ruby.wasm');
+      assert.equal(compat.rubyWasm.target, 'wasm32-wasi');
+      assert.equal(compat.rubyWasm.wasiHost, 'holo-wasi-host-b8g.wasm');
+      assert.equal(compat.rubyWasm.rubyVersion, '3.4.2');
+      assert.equal(compat.nativeExtensionSonames.nokogiri.soname, 'libxml2.so.2');
+      assert.equal(compat.nativeExtensionSonames.sqlite3.soname, 'libsqlite3.so.0');
+      assert.equal(compat.nativeExtensionSonames.rdkafka.soname, 'librdkafka.so.1');
+      const nokogiriGem = compat.gems.find((g) => g.name === 'nokogiri');
+      assert.equal(nokogiriGem?.version, '1.18.4');
+      assert.equal(nokogiriGem?.soname, 'libxml2.so.2');
+
+      assert.equal(existsSync(join(dir, '.bundle')), false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -698,13 +932,13 @@ describe('holo-ci CLI', () => {
     }
   });
 
-  it('executes lock-compat --ecosystem all --out-dir dist/eco --json via CLI', () => {
+  it('executes lock-compat --ecosystem all --out-dir dist/eco --json via CLI and normalizes php/ruby/bundler aliases', () => {
     const cliPath = join(HERE, 'cli.mts');
-    const dir = makeTempDir('holo-ci-cli-7eco-');
+    const dir = makeTempDir('holo-ci-cli-9eco-');
     try {
       writeFileSync(
         join(dir, 'package.json'),
-        JSON.stringify({ name: 'cli-7eco-demo', version: '1.0.0', dependencies: { zod: '^3.25.0' } }),
+        JSON.stringify({ name: 'cli-9eco-demo', version: '1.0.0', dependencies: { zod: '^3.25.0' } }),
         'utf8',
       );
       const res = spawnSync(
@@ -725,10 +959,36 @@ describe('holo-ci CLI', () => {
       assert.equal(receipt.schema, HOLO_CI_RECEIPT_SCHEMA);
       assert.equal(receipt.ok, true);
       assert.equal(receipt.lockCompat?.ecosystem, 'all');
-      assert.equal(receipt.lockCompat?.ecosystemsGenerated.length, 7);
-      assert.ok((receipt.lockCompat?.artifacts.length ?? 0) >= 14);
+      assert.equal(receipt.lockCompat?.ecosystemsGenerated.length, 9);
+      assert.ok((receipt.lockCompat?.artifacts.length ?? 0) >= 28);
       assert.equal(existsSync(join(dir, 'dist', 'eco', 'dpkg-status.holo-v11')), true);
       assert.equal(existsSync(join(dir, 'dist', 'eco', 'go.work')), true);
+      assert.equal(existsSync(join(dir, 'dist', 'eco', 'composer.holo-v11.json')), true);
+      assert.equal(existsSync(join(dir, 'dist', 'eco', 'php.holo-v11.ini')), true);
+      assert.equal(existsSync(join(dir, 'dist', 'eco', 'wp-env.holo-v11.json')), true);
+      assert.equal(existsSync(join(dir, 'dist', 'eco', '.bundle', 'config.holo-v11')), true);
+      assert.equal(existsSync(join(dir, 'dist', 'eco', 'holo-rubygems-compat.json')), true);
+
+      // Verify CLI aliases: php -> composer, ruby -> rubygems, bundler -> rubygems
+      for (const [alias, expectedEco] of [
+        ['php', 'composer'],
+        ['ruby', 'rubygems'],
+        ['bundler', 'rubygems'],
+      ]) {
+        const aliasRes = spawnSync(
+          process.execPath,
+          [cliPath, 'lock-compat', '--ecosystem', alias, '--cwd', dir, '--dry-run', '--json'],
+          { encoding: 'utf8' },
+        );
+        assert.equal(aliasRes.status, 0, aliasRes.stderr);
+        const aliasReceipt = JSON.parse(aliasRes.stdout) as {
+          ok: boolean;
+          lockCompat?: { ecosystem: string; ecosystemsGenerated: string[] };
+        };
+        assert.equal(aliasReceipt.ok, true);
+        assert.equal(aliasReceipt.lockCompat?.ecosystem, expectedEco);
+        assert.deepEqual(aliasReceipt.lockCompat?.ecosystemsGenerated, [expectedEco]);
+      }
 
       const badRes = spawnSync(
         process.execPath,

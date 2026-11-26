@@ -39,9 +39,9 @@ Run directly via native Node 24/26 (`node holo-ci/cli.mts <phase> [options]`):
 | `telemetry` | Emits `holo-ci.receipt.v1` JSON/NDJSON (`--receipt`) and appends Markdown summaries to `$GITHUB_STEP_SUMMARY` (`--emit-summary`). |
 | `maintain` | Performs zero-checkout clean-box HTTP `200`, SHA-512, and Ed25519 signature verification (`node:crypto`). |
 | `init` | Scaffolds a starter `holo-ci.json` manifest in the target directory. |
-| `lock-compat` | Synthesizes zero-copy `v11` CAS lock & metadata projections across 7 ecosystems (`npm`, `cargo`, `uv`, `go`, `vcpkg`, `winget`, `apt`, or `all`) into `--out-dir` without mutating `node_modules` or host package stores. |
+| `lock-compat` | Synthesizes zero-copy `v11` CAS lock & metadata projections across 9 ecosystems (`npm`, `cargo`, `uv`, `go`, `vcpkg`, `winget`, `apt`, `composer`, `rubygems`, or `all`; aliases: `php`, `ruby`, `bundler`) into `--out-dir` without mutating `node_modules` or host package stores. |
 
-Common flags: `--config <path>`, `--receipt <path>`, `--emit-summary`, `--json`, `--cwd <dir>`, `--out <path>`, `--out-dir <dir>`, `--ecosystem <all|npm|cargo|uv|go|vcpkg|winget|apt>`, `--dry-run`, `--max-lock <path>`, `--help`.
+Common flags: `--config <path>`, `--receipt <path>`, `--emit-summary`, `--json`, `--cwd <dir>`, `--out <path>`, `--out-dir <dir>`, `--ecosystem <all|npm|cargo|uv|go|vcpkg|winget|apt|composer|rubygems>`, `--dry-run`, `--max-lock <path>`, `--help`.
 
 ### Zero-Migration Strangler-Fig Hybrid Workspace Pattern (`holo-ci lock-compat`)
 
@@ -58,8 +58,12 @@ When migrating or interoperating between native package managers and the Awesome
    npm i --package-lock-only
    node holo-ci/cli.mts lock-compat --ecosystem npm --cwd . --out package-lock.json --dry-run --json
 
-   # Emit all 7 ecosystem projections into an isolated output directory
+   # Emit all 9 ecosystem projections into an isolated output directory
    node holo-ci/cli.mts lock-compat --ecosystem all --cwd . --out-dir dist/lock-compat --json
+
+   # PHP (Composer + PHP-WASI @wp/env) and Ruby (Bundler + ruby.wasm) aliases
+   node holo-ci/cli.mts lock-compat --ecosystem php --cwd . --out-dir dist/lock-compat --json
+   node holo-ci/cli.mts lock-compat --ecosystem ruby --cwd . --out-dir dist/lock-compat --json
    ```
 
 Supported `--ecosystem` targets (`default: npm`):
@@ -70,9 +74,11 @@ Supported `--ecosystem` targets (`default: npm`):
 | `cargo` | `.cargo/config.toml` (`[source.crates-io] replace-with = "holo-v11"`) + `holo-cargo-compat.json` | Offline vendor CAS mapping without touching `~/.cargo`. |
 | `uv` | `uv.toml` (`link-mode = "hardlink"`, `cache-dir`) + `requirements.holo-v11.txt` | Hardlink CAS cache projection without touching host Python envs. |
 | `go` | `go.work` (`go 1.24`, CAS proxy metadata) | Discovers local `go.mod` modules with `v11` CAS `GOPROXY` metadata. |
-| `vcpkg` | `vcpkg-configuration.json` + `pkgconfig/*.pc` (`openssl`, `pixman`, `cairo`, `harfbuzz`, `zstd`, `libxml2`) | Pinned `v11` C/C++ library stubs driven by `max-version-lock.json`. |
+| `vcpkg` | `vcpkg-configuration.json` + `pkgconfig/*.pc` (17 shared C/C++ libs incl. `openssl`, `curl`, `sqlite`, `icu4c`, `libsodium`, `oniguruma`, `libxml2`, `libxslt`, `libgd`, `libzip`, `libgit2`, `librdkafka`, `libvips`, `cairo`, `harfbuzz`, `pixman`, `zstd`) | Pinned `v11` C/C++ library stubs driven by `max-version-lock.json`. |
 | `winget` | `winget-import.holo-v11.json` + `winget-hkcu-arp.holo-v11.json` | Zero-UAC `HKCU` portable ARP registry manifest JSON (`0` MSI installers). |
 | `apt` | `dpkg-status.holo-v11` (`Status: install ok installed` virtual-provides stanzas) | Mandatory ELF `soname` gate on every stanza; zero `/var/lib/dpkg` writes. |
+| `composer` *(alias: `php`)* | `composer.holo-v11.json` + `php.holo-v11.ini` + `wp-env.holo-v11.json` (`@wp/env` `php-wasi` + `sqlite-wasi`) | Symlink CAS path repo + `v11` C-extension pins; zero `vendor/` mutation. |
+| `rubygems` *(aliases: `ruby`, `bundler`)* | `.bundle/config.holo-v11` + `holo-rubygems-compat.json` (C-ext SONAME map + `ruby.wasm` WASI) | Offline `v11` gem cache & system-lib flags; zero host `~/.gem` mutation. |
 
 ### 2. 5-OS Native Matrix Release (`reusable-5os-release.yml`)
 ```yaml

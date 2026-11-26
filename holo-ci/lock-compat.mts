@@ -80,6 +80,17 @@ const PINNED_V11_CPP_LIBS: readonly PinnedV11CppLib[] = [
     description: '2D graphics library (Holo v11 CAS)',
   },
   {
+    name: 'curl',
+    pcName: 'libcurl',
+    defaultVersion: '8.23.0',
+    aptPackage: 'libcurl4t64',
+    aptProvides: ['libcurl4', 'holo-v11-curl'],
+    soname: 'libcurl.so.4',
+    wingetId: 'AwesomeOS.V11.Curl',
+    libsFlag: '-lcurl',
+    description: 'Multipass URL transfer library (Holo v11 CAS)',
+  },
+  {
     name: 'harfbuzz',
     pcName: 'harfbuzz',
     defaultVersion: '10.2.0',
@@ -91,6 +102,72 @@ const PINNED_V11_CPP_LIBS: readonly PinnedV11CppLib[] = [
     description: 'OpenType text shaping engine (Holo v11 CAS)',
   },
   {
+    name: 'icu4c',
+    pcName: 'icu-uc',
+    defaultVersion: '79.1',
+    aptPackage: 'libicu79',
+    aptProvides: ['holo-v11-icu4c', 'libicu-v11'],
+    soname: 'libicuuc.so.79',
+    wingetId: 'AwesomeOS.V11.ICU4C',
+    libsFlag: '-licuuc -licui18n -licudata',
+    description: 'International Components for Unicode C/C++ library (Holo v11 CAS)',
+  },
+  {
+    name: 'libgd',
+    pcName: 'gdlib',
+    defaultVersion: '2.3.3',
+    aptPackage: 'libgd3',
+    aptProvides: ['holo-v11-libgd', 'libgd-v11'],
+    soname: 'libgd.so.3',
+    wingetId: 'AwesomeOS.V11.LibGD',
+    libsFlag: '-lgd',
+    description: 'GD graphics library for dynamic image creation (Holo v11 CAS)',
+  },
+  {
+    name: 'libgit2',
+    pcName: 'libgit2',
+    defaultVersion: '1.9.0',
+    aptPackage: 'libgit2-1.9',
+    aptProvides: ['holo-v11-libgit2', 'libgit2-v11'],
+    soname: 'libgit2.so.1.9',
+    wingetId: 'AwesomeOS.V11.LibGit2',
+    libsFlag: '-lgit2',
+    description: 'Portable pure-C Git core implementation (Holo v11 CAS)',
+  },
+  {
+    name: 'librdkafka',
+    pcName: 'rdkafka',
+    defaultVersion: '2.8.0',
+    aptPackage: 'librdkafka1',
+    aptProvides: ['holo-v11-librdkafka', 'librdkafka-v11'],
+    soname: 'librdkafka.so.1',
+    wingetId: 'AwesomeOS.V11.LibRdKafka',
+    libsFlag: '-lrdkafka',
+    description: 'Apache Kafka C/C++ client library (Holo v11 CAS)',
+  },
+  {
+    name: 'libsodium',
+    pcName: 'libsodium',
+    defaultVersion: '1.0.20',
+    aptPackage: 'libsodium23',
+    aptProvides: ['holo-v11-libsodium', 'libsodium-v11'],
+    soname: 'libsodium.so.23',
+    wingetId: 'AwesomeOS.V11.LibSodium',
+    libsFlag: '-lsodium',
+    description: 'Modern portable cryptography library (Holo v11 CAS)',
+  },
+  {
+    name: 'libvips',
+    pcName: 'vips',
+    defaultVersion: '8.16.1',
+    aptPackage: 'libvips42',
+    aptProvides: ['holo-v11-libvips', 'libvips-v11'],
+    soname: 'libvips.so.42',
+    wingetId: 'AwesomeOS.V11.LibVips',
+    libsFlag: '-lvips',
+    description: 'Demand-driven image processing library (Holo v11 CAS)',
+  },
+  {
     name: 'libxml2',
     pcName: 'libxml-2.0',
     defaultVersion: '2.13.8',
@@ -100,6 +177,39 @@ const PINNED_V11_CPP_LIBS: readonly PinnedV11CppLib[] = [
     wingetId: 'AwesomeOS.V11.LibXML2',
     libsFlag: '-lxml2',
     description: 'GNOME XML library (Holo v11 CAS)',
+  },
+  {
+    name: 'libxslt',
+    pcName: 'libxslt',
+    defaultVersion: '1.1.43',
+    aptPackage: 'libxslt1.1',
+    aptProvides: ['holo-v11-libxslt', 'libxslt-v11'],
+    soname: 'libxslt.so.1',
+    wingetId: 'AwesomeOS.V11.LibXSLT',
+    libsFlag: '-lxslt',
+    description: 'XSLT C library developed for GNOME (Holo v11 CAS)',
+  },
+  {
+    name: 'libzip',
+    pcName: 'libzip',
+    defaultVersion: '1.11.3',
+    aptPackage: 'libzip5',
+    aptProvides: ['holo-v11-libzip', 'libzip-v11'],
+    soname: 'libzip.so.5',
+    wingetId: 'AwesomeOS.V11.LibZip',
+    libsFlag: '-lzip',
+    description: 'C library for reading, creating, and modifying zip archives (Holo v11 CAS)',
+  },
+  {
+    name: 'oniguruma',
+    pcName: 'oniguruma',
+    defaultVersion: '6.9.10',
+    aptPackage: 'libonig5',
+    aptProvides: ['holo-v11-oniguruma', 'libonig-v11'],
+    soname: 'libonig.so.5',
+    wingetId: 'AwesomeOS.V11.Oniguruma',
+    libsFlag: '-lonig',
+    description: 'Modern regular expressions library (Holo v11 CAS)',
   },
   {
     name: 'openssl',
@@ -124,6 +234,17 @@ const PINNED_V11_CPP_LIBS: readonly PinnedV11CppLib[] = [
     description: 'Pixel-manipulation library for X and cairo (Holo v11 CAS)',
   },
   {
+    name: 'sqlite',
+    pcName: 'sqlite3',
+    defaultVersion: '3.54.1',
+    aptPackage: 'libsqlite3-0',
+    aptProvides: ['holo-v11-sqlite', 'libsqlite3-v11'],
+    soname: 'libsqlite3.so.0',
+    wingetId: 'AwesomeOS.V11.SQLite',
+    libsFlag: '-lsqlite3',
+    description: 'Self-contained serverless SQL database engine (Holo v11 CAS)',
+  },
+  {
     name: 'zstd',
     pcName: 'libzstd',
     defaultVersion: '1.5.7',
@@ -144,6 +265,8 @@ const ALL_ECOSYSTEMS: readonly HoloCiLockCompatSingleEcosystem[] = [
   'vcpkg',
   'winget',
   'apt',
+  'composer',
+  'rubygems',
 ];
 
 const ELF_SONAME_RE = /^[A-Za-z0-9_+.-]+\.so(?:\.[0-9]+)*$/;
@@ -1014,6 +1137,507 @@ function synthesizeAptCompat(
   return stanzas.length;
 }
 
+interface ComposerJsonShape {
+  name?: string;
+  version?: string;
+  require?: Record<string, string>;
+  'require-dev'?: Record<string, string>;
+}
+
+interface ComposerLockEntry {
+  name?: string;
+  version?: string;
+  dist?: { url?: string; type?: string; shasum?: string };
+}
+
+interface ComposerLockShape {
+  packages?: ComposerLockEntry[];
+  'packages-dev'?: ComposerLockEntry[];
+}
+
+interface WpEnvJsonShape {
+  core?: string | null;
+  phpVersion?: string;
+  plugins?: string[];
+  themes?: string[];
+  mappings?: Record<string, string>;
+  config?: Record<string, unknown>;
+  env?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+function normalizeComposerPackageName(rawName: string): string {
+  if (rawName.includes('/')) return rawName.toLowerCase();
+  const slug = rawName
+    .replace(/^@/, '')
+    .replace(/[^A-Za-z0-9_.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase();
+  return `awesome-os/${slug || 'workspace'}`;
+}
+
+function synthesizeComposerCompat(
+  cwd: string,
+  baseOutDir: string,
+  rootName: string,
+  rootVersion: string,
+  maxLockOverrides: Map<string, string>,
+  dryRun: boolean,
+  artifacts: HoloCiLockCompatArtifact[],
+): number {
+  const composerJsonPath = resolve(cwd, 'composer.json');
+  const composerLockPath = resolve(cwd, 'composer.lock');
+  const wpEnvPath = resolve(cwd, '.wp-env.json');
+
+  const composerJson: ComposerJsonShape = existsSync(composerJsonPath)
+    ? (JSON.parse(readFileSync(composerJsonPath, 'utf8')) as ComposerJsonShape)
+    : {};
+  const composerLock: ComposerLockShape = existsSync(composerLockPath)
+    ? (JSON.parse(readFileSync(composerLockPath, 'utf8')) as ComposerLockShape)
+    : {};
+  const userWpEnv: WpEnvJsonShape = existsSync(wpEnvPath)
+    ? (JSON.parse(readFileSync(wpEnvPath, 'utf8')) as WpEnvJsonShape)
+    : {};
+
+  const pkgName = normalizeComposerPackageName(composerJson.name?.trim() || rootName);
+  const pkgVersion = composerJson.version?.trim() || rootVersion || '0.0.0';
+  const requireMap = sortStringRecord(composerJson.require) ?? {};
+  const requireDevMap = sortStringRecord(composerJson['require-dev']) ?? {};
+
+  const lockedPackages = new Map<string, { name: string; version: string; dev: boolean; shasum?: string }>();
+  for (const entry of composerLock.packages ?? []) {
+    if (!entry.name) continue;
+    const ver = maxLockOverrides.get(entry.name) ?? entry.version?.replace(/^v/i, '') ?? '0.0.0';
+    lockedPackages.set(entry.name, {
+      name: entry.name,
+      version: ver,
+      dev: false,
+      ...(entry.dist?.shasum ? { shasum: entry.dist.shasum } : {}),
+    });
+  }
+  for (const entry of composerLock['packages-dev'] ?? []) {
+    if (!entry.name || lockedPackages.has(entry.name)) continue;
+    const ver = maxLockOverrides.get(entry.name) ?? entry.version?.replace(/^v/i, '') ?? '0.0.0';
+    lockedPackages.set(entry.name, {
+      name: entry.name,
+      version: ver,
+      dev: true,
+      ...(entry.dist?.shasum ? { shasum: entry.dist.shasum } : {}),
+    });
+  }
+
+  const registerDeclared = (map: Record<string, string>, dev: boolean): void => {
+    for (const [depName, constraint] of Object.entries(map)) {
+      if (depName === 'php' || depName.startsWith('ext-') || depName.startsWith('lib-')) continue;
+      if (lockedPackages.has(depName)) continue;
+      const ver = maxLockOverrides.get(depName) ?? normalizeDeclaredVersion(constraint);
+      lockedPackages.set(depName, { name: depName, version: ver, dev });
+    }
+  };
+  registerDeclared(requireMap, false);
+  registerDeclared(requireDevMap, true);
+
+  const resolvedPackages = Array.from(lockedPackages.values())
+    .sort((a, b) => byteCompare(a.name, b.name))
+    .map((p) => ({
+      name: p.name,
+      version: p.version,
+      dev: p.dev,
+      holoCasStore: 'v11',
+      casSha512: sha512Text(`composer:${p.name}@${p.version}`),
+      ...(p.shasum ? { distShasum: p.shasum } : {}),
+    }));
+
+  const composerHoloJson = `${JSON.stringify(
+    {
+      schema: 'holo-v11.composer-compat.v1',
+      abiMagic: B8G_ABI_MAGIC_V3,
+      holoCasStore: 'v11',
+      zeroVendorMutation: true,
+      name: pkgName,
+      version: pkgVersion,
+      config: {
+        'cache-dir': '/var/lib/b8g/cas/v11/composer',
+        'preferred-install': 'dist',
+        'sort-packages': true,
+      },
+      repositories: [
+        {
+          type: 'path',
+          url: '/var/lib/b8g/cas/v11/composer/*',
+          options: {
+            symlink: true,
+          },
+        },
+      ],
+      require: requireMap,
+      'require-dev': requireDevMap,
+      packages: resolvedPackages,
+    },
+    null,
+    2,
+  )}\n`;
+
+  const cppLibs = resolvePinnedCppLibs(maxLockOverrides);
+  const phpIniLines = [
+    '; Generated by holo-ci lock-compat (v11 CAS zero-copy projection)',
+    `; abiMagic: ${B8G_ABI_MAGIC_V3}`,
+    '; holoCasStore: v11',
+    '[PHP]',
+    'extension_dir = "/var/lib/b8g/cas/v11/php/ext"',
+    'zend.assertions = -1',
+    'opcache.enable = 1',
+    'opcache.enable_cli = 1',
+    'curl.cainfo = "/var/lib/b8g/cas/v11/ssl/cacert.pem"',
+    'openssl.cafile = "/var/lib/b8g/cas/v11/ssl/cacert.pem"',
+    'sqlite3.defensive = 1',
+    '',
+    '; Mapped v11 shared native C library pins',
+    ...cppLibs.map((lib) => `; v11-pin.${lib.name} = "${lib.version}" ; ${lib.soname}`),
+    '',
+    'extension = curl',
+    'extension = gd',
+    'extension = intl',
+    'extension = mbstring',
+    'extension = openssl',
+    'extension = pdo_sqlite',
+    'extension = sodium',
+    'extension = xsl',
+    'extension = zip',
+    '',
+  ].join('\n');
+
+  const phpVersionRaw =
+    typeof userWpEnv.phpVersion === 'string' && userWpEnv.phpVersion.trim().length > 0
+      ? userWpEnv.phpVersion.trim()
+      : '8.4';
+
+  const wpEnvHoloJson = `${JSON.stringify(
+    {
+      schema: 'holo-v11.wp-env.v1',
+      abiMagic: B8G_ABI_MAGIC_V3,
+      holoCasStore: 'v11',
+      name: pkgName,
+      ...userWpEnv,
+      phpVersion: phpVersionRaw,
+      runtime: 'php-wasi',
+      dbEngine: 'sqlite-wasi',
+      casRoot: '/var/lib/b8g/cas/v11',
+      wasiHost: 'holo-wasi-host-b8g.wasm',
+    },
+    null,
+    2,
+  )}\n`;
+
+  emitProjectionFile(
+    artifacts,
+    'composer',
+    baseOutDir,
+    resolve(baseOutDir, 'composer.holo-v11.json'),
+    composerHoloJson,
+    dryRun,
+  );
+  emitProjectionFile(
+    artifacts,
+    'composer',
+    baseOutDir,
+    resolve(baseOutDir, 'php.holo-v11.ini'),
+    phpIniLines,
+    dryRun,
+  );
+  emitProjectionFile(
+    artifacts,
+    'composer',
+    baseOutDir,
+    resolve(baseOutDir, 'wp-env.holo-v11.json'),
+    wpEnvHoloJson,
+    dryRun,
+  );
+
+  return resolvedPackages.length > 0 ? resolvedPackages.length : 1;
+}
+
+interface ParsedGemEntry {
+  name: string;
+  version: string;
+  source: 'Gemfile' | 'Gemfile.lock' | 'gemspec';
+}
+
+function parseRubyEcosystemFiles(
+  cwd: string,
+  maxLockOverrides: Map<string, string>,
+): {
+  gemspecName?: string;
+  gemspecVersion?: string;
+  rubyVersion: string;
+  gems: ParsedGemEntry[];
+} {
+  const gemMap = new Map<string, ParsedGemEntry>();
+  let gemspecName: string | undefined;
+  let gemspecVersion: string | undefined;
+  let rubyVersion = '3.4.2';
+
+  const dirEntries = existsSync(cwd)
+    ? readdirSync(cwd, { withFileTypes: true }).sort((a, b) => byteCompare(a.name, b.name))
+    : [];
+  const gemspecFiles = dirEntries
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.gemspec'))
+    .map((entry) => join(cwd, entry.name));
+
+  for (const specPath of gemspecFiles) {
+    const text = readFileSync(specPath, 'utf8');
+    const nameMatch = /^\s*[A-Za-z_][A-Za-z0-9_]*\.name\s*=\s*["']([^"']+)["']/m.exec(text);
+    if (nameMatch && !gemspecName) gemspecName = nameMatch[1];
+    const verMatch = /^\s*[A-Za-z_][A-Za-z0-9_]*\.version\s*=\s*["']([^"']+)["']/m.exec(text);
+    if (verMatch && !gemspecVersion) gemspecVersion = verMatch[1];
+    const depMatches = text.matchAll(
+      /add_(?:runtime_|development_)?dependency\s*\(?\s*["']([A-Za-z0-9_.-]+)["'](?:\s*,\s*["']([^"']+)["'])?/g,
+    );
+    for (const m of depMatches) {
+      const name = m[1];
+      const ver = maxLockOverrides.get(name) ?? (m[2] ? normalizeDeclaredVersion(m[2]) : '0.0.0');
+      gemMap.set(name, { name, version: ver, source: 'gemspec' });
+    }
+  }
+
+  const gemfilePath = resolve(cwd, 'Gemfile');
+  if (existsSync(gemfilePath)) {
+    const lines = readFileSync(gemfilePath, 'utf8').split(/\r?\n/);
+    for (const rawLine of lines) {
+      const line = rawLine.split('#')[0]?.trim() ?? '';
+      if (!line) continue;
+      const rubyMatch = /^ruby\s+["']([^"']+)["']/.exec(line);
+      if (rubyMatch) {
+        rubyVersion = rubyMatch[1];
+        continue;
+      }
+      const gemMatch = /^gem\s+["']([A-Za-z0-9_.-]+)["'](?:\s*,\s*["']([^"']+)["'])?/.exec(line);
+      if (gemMatch) {
+        const name = gemMatch[1];
+        const ver = maxLockOverrides.get(name) ?? (gemMatch[2] ? normalizeDeclaredVersion(gemMatch[2]) : '0.0.0');
+        gemMap.set(name, { name, version: ver, source: 'Gemfile' });
+      }
+    }
+  }
+
+  const gemfileLockPath = resolve(cwd, 'Gemfile.lock');
+  if (existsSync(gemfileLockPath)) {
+    const lines = readFileSync(gemfileLockPath, 'utf8').split(/\r?\n/);
+    let section = '';
+    let inSpecs = false;
+    for (const line of lines) {
+      if (/^[A-Z][A-Z ]+$/.test(line.trim())) {
+        section = line.trim();
+        inSpecs = false;
+        continue;
+      }
+      if (section === 'GEM' && line.trim() === 'specs:') {
+        inSpecs = true;
+        continue;
+      }
+      if (section === 'GEM' && inSpecs) {
+        const specMatch = /^ {4}([A-Za-z0-9_.-]+)\s+\(([^)]+)\)$/.exec(line);
+        if (specMatch) {
+          const name = specMatch[1];
+          const rawVer = specMatch[2].split('-')[0] ?? specMatch[2];
+          const ver = maxLockOverrides.get(name) ?? rawVer;
+          gemMap.set(name, { name, version: ver, source: 'Gemfile.lock' });
+        }
+      } else if (section === 'RUBY VERSION') {
+        const rvMatch = /ruby\s+([0-9]+\.[0-9]+\.[0-9]+)/.exec(line);
+        if (rvMatch) rubyVersion = rvMatch[1];
+      }
+    }
+  }
+
+  const gems = Array.from(gemMap.values()).sort((a, b) => byteCompare(a.name, b.name));
+  return {
+    ...(gemspecName ? { gemspecName } : {}),
+    ...(gemspecVersion ? { gemspecVersion } : {}),
+    rubyVersion,
+    gems,
+  };
+}
+
+function synthesizeRubygemsCompat(
+  cwd: string,
+  baseOutDir: string,
+  rootName: string,
+  rootVersion: string,
+  maxLockOverrides: Map<string, string>,
+  dryRun: boolean,
+  artifacts: HoloCiLockCompatArtifact[],
+): number {
+  const parsed = parseRubyEcosystemFiles(cwd, maxLockOverrides);
+  const cppLibs = resolvePinnedCppLibs(maxLockOverrides);
+  const libByName = new Map(cppLibs.map((lib) => [lib.name, lib]));
+
+  const sonameEntries: Array<[string, { soname: string; libraries: string[]; versions: Record<string, string>; holoCasStore: 'v11'; libxsltSoname?: string }]> = [
+    [
+      'curb',
+      {
+        soname: libByName.get('curl')?.soname ?? 'libcurl.so.4',
+        libraries: ['curl'],
+        versions: { curl: libByName.get('curl')?.version ?? '8.23.0' },
+        holoCasStore: 'v11',
+      },
+    ],
+    [
+      'ffi',
+      {
+        soname: 'libffi.so.8',
+        libraries: ['libffi'],
+        versions: { libffi: maxLockOverrides.get('libffi') ?? '3.4.7' },
+        holoCasStore: 'v11',
+      },
+    ],
+    [
+      'nokogiri',
+      {
+        soname: libByName.get('libxml2')?.soname ?? 'libxml2.so.2',
+        libxsltSoname: libByName.get('libxslt')?.soname ?? 'libxslt.so.1',
+        libraries: ['libxml2', 'libxslt'],
+        versions: {
+          libxml2: libByName.get('libxml2')?.version ?? '2.13.8',
+          libxslt: libByName.get('libxslt')?.version ?? '1.1.43',
+        },
+        holoCasStore: 'v11',
+      },
+    ],
+    [
+      'openssl',
+      {
+        soname: libByName.get('openssl')?.soname ?? 'libssl.so.3',
+        libraries: ['openssl'],
+        versions: { openssl: libByName.get('openssl')?.version ?? '4.1.0' },
+        holoCasStore: 'v11',
+      },
+    ],
+    [
+      'psych',
+      {
+        soname: 'libyaml-0.so.2',
+        libraries: ['libyaml'],
+        versions: { libyaml: maxLockOverrides.get('libyaml') ?? '0.2.5' },
+        holoCasStore: 'v11',
+      },
+    ],
+    [
+      'rbnacl',
+      {
+        soname: libByName.get('libsodium')?.soname ?? 'libsodium.so.23',
+        libraries: ['libsodium'],
+        versions: { libsodium: libByName.get('libsodium')?.version ?? '1.0.20' },
+        holoCasStore: 'v11',
+      },
+    ],
+    [
+      'rdkafka',
+      {
+        soname: libByName.get('librdkafka')?.soname ?? 'librdkafka.so.1',
+        libraries: ['librdkafka'],
+        versions: { librdkafka: libByName.get('librdkafka')?.version ?? '2.8.0' },
+        holoCasStore: 'v11',
+      },
+    ],
+    [
+      'ruby-vips',
+      {
+        soname: libByName.get('libvips')?.soname ?? 'libvips.so.42',
+        libraries: ['libvips'],
+        versions: { libvips: libByName.get('libvips')?.version ?? '8.16.1' },
+        holoCasStore: 'v11',
+      },
+    ],
+    [
+      'rugged',
+      {
+        soname: libByName.get('libgit2')?.soname ?? 'libgit2.so.1.9',
+        libraries: ['libgit2'],
+        versions: { libgit2: libByName.get('libgit2')?.version ?? '1.9.0' },
+        holoCasStore: 'v11',
+      },
+    ],
+    [
+      'sqlite3',
+      {
+        soname: libByName.get('sqlite')?.soname ?? 'libsqlite3.so.0',
+        libraries: ['sqlite'],
+        versions: { sqlite: libByName.get('sqlite')?.version ?? '3.54.1' },
+        holoCasStore: 'v11',
+      },
+    ],
+  ];
+
+  const nativeExtensionSonames: Record<string, (typeof sonameEntries)[number][1]> = {};
+  for (const [gemName, info] of sonameEntries.sort((a, b) => byteCompare(a[0], b[0]))) {
+    nativeExtensionSonames[gemName] = info;
+  }
+
+  const bundleConfig = [
+    '---',
+    '# Generated by holo-ci lock-compat (v11 CAS zero-copy projection)',
+    'BUNDLE_CACHE_PATH: "/var/lib/b8g/cas/v11/gems"',
+    'BUNDLE_LOCAL: "true"',
+    'BUNDLE_DEPLOYMENT: "true"',
+    'BUNDLE_BUILD__NOKOGIRI: "--use-system-libraries"',
+    'BUNDLE_BUILD__PSYCH: "--with-libyaml-dir=/var/lib/b8g/cas/v11"',
+    'BUNDLE_BUILD__FFI: "--enable-system-libffi"',
+    'BUNDLE_BUILD__SQLITE3: "--enable-system-libraries"',
+    'BUNDLE_BUILD__OPENSSL: "--with-openssl-dir=/var/lib/b8g/cas/v11"',
+    '',
+  ].join('\n');
+
+  const compatJson = `${JSON.stringify(
+    {
+      schema: 'holo-v11.rubygems-compat.v1',
+      abiMagic: B8G_ABI_MAGIC_V3,
+      name: parsed.gemspecName ?? rootName,
+      version: parsed.gemspecVersion ?? rootVersion,
+      holoCasStore: 'v11',
+      zeroHostGemMutation: true,
+      bundleCachePath: '/var/lib/b8g/cas/v11/gems',
+      rubyWasm: {
+        runtime: 'ruby.wasm',
+        target: 'wasm32-wasi',
+        wasiHost: 'holo-wasi-host-b8g.wasm',
+        casRoot: '/var/lib/b8g/cas/v11',
+        rubyVersion: parsed.rubyVersion,
+      },
+      nativeExtensionSonames,
+      gems: parsed.gems.map((g) => ({
+        name: g.name,
+        version: g.version,
+        source: g.source,
+        holoCasStore: 'v11',
+        casSha512: sha512Text(`rubygems:${g.name}@${g.version}`),
+        ...(nativeExtensionSonames[g.name] ? { soname: nativeExtensionSonames[g.name].soname } : {}),
+      })),
+    },
+    null,
+    2,
+  )}\n`;
+
+  emitProjectionFile(
+    artifacts,
+    'rubygems',
+    baseOutDir,
+    resolve(baseOutDir, '.bundle', 'config.holo-v11'),
+    bundleConfig,
+    dryRun,
+  );
+  emitProjectionFile(
+    artifacts,
+    'rubygems',
+    baseOutDir,
+    resolve(baseOutDir, 'holo-rubygems-compat.json'),
+    compatJson,
+    dryRun,
+  );
+
+  return parsed.gems.length > 0 ? parsed.gems.length : Object.keys(nativeExtensionSonames).length;
+}
+
 export function runLockCompat(opts: LockCompatOptions = {}): HoloCiLockCompatResult {
   const cwd = resolve(opts.cwd ?? process.cwd());
   const ecosystem: HoloCiLockCompatEcosystem = opts.ecosystem ?? 'npm';
@@ -1073,6 +1697,26 @@ export function runLockCompat(opts: LockCompatOptions = {}): HoloCiLockCompatRes
       packageCount += synthesizeWingetCompat(baseOutDir, rootName, maxLockOverrides, dryRun, artifacts);
     } else if (target === 'apt') {
       packageCount += synthesizeAptCompat(baseOutDir, maxLockOverrides, opts.aptStanzas, dryRun, artifacts);
+    } else if (target === 'composer') {
+      packageCount += synthesizeComposerCompat(
+        cwd,
+        baseOutDir,
+        rootName,
+        rootVersion,
+        maxLockOverrides,
+        dryRun,
+        artifacts,
+      );
+    } else if (target === 'rubygems') {
+      packageCount += synthesizeRubygemsCompat(
+        cwd,
+        baseOutDir,
+        rootName,
+        rootVersion,
+        maxLockOverrides,
+        dryRun,
+        artifacts,
+      );
     }
   }
 

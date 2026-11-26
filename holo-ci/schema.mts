@@ -223,7 +223,9 @@ export type HoloCiLockCompatEcosystem =
   | 'go'
   | 'vcpkg'
   | 'winget'
-  | 'apt';
+  | 'apt'
+  | 'composer'
+  | 'rubygems';
 
 export type HoloCiLockCompatSingleEcosystem = Exclude<HoloCiLockCompatEcosystem, 'all'>;
 
