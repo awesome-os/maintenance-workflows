@@ -20,7 +20,7 @@ jobs:
     uses: awesome-os/maintenance-workflows/.github/workflows/reusable-holo-ci.yml@v1
     with:
       config-path: holo-ci.json
-      node-version: '24'
+      node-version: '26'
       phase: verify
       working-directory: '.'
       holo-ci-ref: v1
@@ -85,7 +85,7 @@ Supported `--ecosystem` targets (`default: npm`):
 
 ### 2. Offscreen Lavapipe + Zero-X11 E2E Runner (`reusable-holo-e2e.yml@v1`)
 
-Containerized E2E workflow backed by `ghcr.io/awesome-os/holo-e2e-runner:latest` (Lavapipe software Vulkan + Zero-X11 offscreen BMP probe at `/usr/local/bin/holo-e2e-probe`), [`holo-ci`](holo-ci/cli.mts) `verify`, optional `e2e-command` execution (`HOLO_E2E_ARTIFACTS`), and automatic `holo-e2e-artifacts` upload:
+Containerized E2E workflow running on `ubuntu-latest` that resolves `ghcr.io/awesome-os/holo-e2e-runner:latest` (with automatic fallback to the signed `v11-oci-latest` release tarball + `SHA512SUMS-holo-e2e-runner.txt` verification when GHCR is unreachable), mounts the caller workspace + shared `$HOME/.b8g/cas:/var/lib/b8g/cas` volume, executes `/usr/local/bin/holo-e2e-probe` (Lavapipe software Vulkan + Zero-X11 offscreen BMP probe), [`holo-ci`](holo-ci/cli.mts) `verify`, optional `e2e-command` execution (`HOLO_E2E_ARTIFACTS`), appends a summary table (`lavapipeIcd`, `bmpSha512`, `holo-ci verify` status) to `$GITHUB_STEP_SUMMARY`, and uploads `holo-e2e-artifacts`:
 
 ```yaml
 name: E2E

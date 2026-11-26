@@ -11,7 +11,7 @@ on:
       node-version:
         description: 'Node.js version for erasable-TS execution'
         required: false
-        default: '24'
+        default: '26'
         type: string
       phase:
         description: 'Holo-CI phase to execute (verify|sync|bump|pack|telemetry|maintain)'
