@@ -1,5 +1,5 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { basename, join, relative, resolve } from 'node:path';
 import {
   HOLO_BOUNDARY_SCHEMA,
   loadManifest,
@@ -15,7 +15,30 @@ export { HOLO_BOUNDARY_SCHEMA, type HoloBoundaryManifest };
 const LOCALHOST_HTTP_PREFIX = ['http', '://'].join('');
 const HTTP_IPC_REGEX = new RegExp(`${LOCALHOST_HTTP_PREFIX}(?:127\\.0\\.0\\.1|localhost)(?::\\d+)?`, 'i');
 
-const EXCLUDED_DIRS = new Set(['.git', 'node_modules', 'dist', 'build']);
+const EXCLUDED_DIRS = new Set([
+  '.git',
+  'node_modules',
+  'dist',
+  'build',
+  'target',
+  'out',
+  'archive',
+  'third_party',
+  'deps',
+  'v8',
+  'v8_monolith',
+  'github-mirror',
+  'github-releases-mirror',
+  'repository',
+  't2-release',
+  '.b8g-cas',
+  '.awesome-oci',
+  '.tmp-snapshots',
+  'models',
+  'electron-docs',
+  'fdir',
+  '.holo-ci-runtime',
+]);
 const SOURCE_EXT_REGEX = /\.(?:mts|ts|mjs|js|c|cc|h)$/i;
 const TEST_SPEC_REGEX = /\.(?:test|spec)\.[^.]+$/i;
 
@@ -31,8 +54,23 @@ export interface RunBoundaryAuditOptions {
   manifest?: HoloBoundaryManifest;
 }
 
-function collectSourceFiles(cwd: string): string[] {
+function collectSourceFiles(cwd: string, manifest?: HoloBoundaryManifest): string[] {
+  const excludedDirs = new Set(EXCLUDED_DIRS);
+  for (const dir of manifest?.excludeDirs ?? []) {
+    if (dir) excludedDirs.add(dir);
+  }
+
   const results: string[] = [];
+  const seen = new Set<string>();
+
+  const addFile = (filePath: string, fileName: string): void => {
+    if (!SOURCE_EXT_REGEX.test(fileName)) return;
+    if (TEST_SPEC_REGEX.test(fileName)) return;
+    if (!seen.has(filePath)) {
+      seen.add(filePath);
+      results.push(filePath);
+    }
+  };
 
   function walk(dir: string): void {
     const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
@@ -40,14 +78,27 @@ function collectSourceFiles(cwd: string): string[] {
     );
     for (const entry of entries) {
       if (entry.isDirectory()) {
-        if (EXCLUDED_DIRS.has(entry.name)) continue;
+        if (excludedDirs.has(entry.name)) continue;
         walk(join(dir, entry.name));
       } else if (entry.isFile()) {
-        if (!SOURCE_EXT_REGEX.test(entry.name)) continue;
-        if (TEST_SPEC_REGEX.test(entry.name)) continue;
-        results.push(join(dir, entry.name));
+        addFile(join(dir, entry.name), entry.name);
       }
     }
+  }
+
+  const includePaths = manifest?.includePaths?.filter((p) => p.trim().length > 0) ?? [];
+  if (includePaths.length > 0) {
+    for (const relPath of includePaths) {
+      const target = resolve(cwd, relPath);
+      if (!existsSync(target)) continue;
+      const stat = statSync(target);
+      if (stat.isDirectory()) {
+        walk(target);
+      } else if (stat.isFile()) {
+        addFile(target, basename(target));
+      }
+    }
+    return results;
   }
 
   if (existsSync(cwd)) {
@@ -256,7 +307,7 @@ export function runBoundaryAudit(options: RunBoundaryAuditOptions = {}): HoloCiB
   const forbiddenImports = manifest?.forbiddenImports ?? [];
   const allowedImports = manifest?.allowedImports ?? [];
 
-  const sourceFiles = collectSourceFiles(cwd);
+  const sourceFiles = collectSourceFiles(cwd, manifest);
   let forbiddenCount = 0;
   let traversalCount = 0;
   let httpIpcCount = 0;

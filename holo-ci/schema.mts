@@ -277,6 +277,8 @@ export interface HoloBoundaryManifest {
   schema: 'holo-boundary.v1';
   plane?: HoloBoundaryPlane;
   publicEntrypoints?: string[];
+  includePaths?: string[];
+  excludeDirs?: string[];
   allowedImports?: string[];
   forbiddenImports?: string[];
   maxParentTraversals?: number;

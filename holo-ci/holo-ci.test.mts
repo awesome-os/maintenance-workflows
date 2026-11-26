@@ -1653,4 +1653,96 @@ describe('holo-ci boundary-audit', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('skips default heavy directories (github-mirror, v8) and manifest excludeDirs', () => {
+    const dir = makeTempDir('holo-ci-boundary-exclude-');
+    try {
+      const badLoopback = ['http', '://', '127.0.0.1:9100'].join('');
+      mkdirSync(join(dir, 'src'), { recursive: true });
+      mkdirSync(join(dir, 'github-mirror', 'repo'), { recursive: true });
+      mkdirSync(join(dir, 'v8', 'src'), { recursive: true });
+      mkdirSync(join(dir, 'custom-vendor', 'nested'), { recursive: true });
+
+      writeFileSync(join(dir, 'src', 'clean.mts'), 'export const ok = true;\n', 'utf8');
+      writeFileSync(
+        join(dir, 'github-mirror', 'repo', 'mirror.mts'),
+        `export const url = '${badLoopback}';\n`,
+        'utf8',
+      );
+      writeFileSync(
+        join(dir, 'v8', 'src', 'engine.cc'),
+        `#include "intersections/sectium-browser/private.h"\n// ${badLoopback}\n`,
+        'utf8',
+      );
+      writeFileSync(
+        join(dir, 'custom-vendor', 'nested', 'vendor.mts'),
+        `export const vUrl = '${badLoopback}';\n`,
+        'utf8',
+      );
+      writeFileSync(
+        join(dir, 'boundary.json'),
+        JSON.stringify({
+          schema: HOLO_BOUNDARY_SCHEMA,
+          plane: 1,
+          excludeDirs: ['custom-vendor'],
+          forbiddenImports: ['intersections/sectium-browser'],
+          scanSourceHttpIpc: true,
+        }),
+        'utf8',
+      );
+
+      const res = runBoundaryAudit({ cwd: dir });
+      assert.equal(res.ok, true);
+      assert.equal(res.scannedFiles, 1);
+      assert.equal(res.violations.length, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('scopes scanning strictly to includePaths subdirectories when specified', () => {
+    const dir = makeTempDir('holo-ci-boundary-include-');
+    try {
+      const badLoopback = ['http', '://', '127.0.0.1:9200'].join('');
+      mkdirSync(join(dir, 'sections', 'core'), { recursive: true });
+      mkdirSync(join(dir, 'packages', 'sdk', 'dist'), { recursive: true });
+      mkdirSync(join(dir, 'outside'), { recursive: true });
+
+      writeFileSync(join(dir, 'sections', 'core', 'a.mts'), 'export const a = 1;\n', 'utf8');
+      writeFileSync(join(dir, 'packages', 'sdk', 'b.mts'), 'export const b = 2;\n', 'utf8');
+      writeFileSync(join(dir, 'packages', 'sdk', 'dist', 'bundle.js'), `const distUrl = '${badLoopback}';\n`, 'utf8');
+      writeFileSync(join(dir, 'outside', 'ignored.mts'), `export const outUrl = '${badLoopback}';\n`, 'utf8');
+      writeFileSync(join(dir, 'root-extra.mts'), `export const rootUrl = '${badLoopback}';\n`, 'utf8');
+      writeFileSync(
+        join(dir, 'boundary.json'),
+        JSON.stringify({
+          schema: HOLO_BOUNDARY_SCHEMA,
+          plane: 1,
+          includePaths: ['sections', 'packages'],
+          scanSourceHttpIpc: true,
+        }),
+        'utf8',
+      );
+
+      const scopedRes = runBoundaryAudit({ cwd: dir });
+      assert.equal(scopedRes.ok, true);
+      assert.equal(scopedRes.scannedFiles, 2);
+      assert.equal(scopedRes.violations.length, 0);
+
+      // Without includePaths, outside/ignored.mts and root-extra.mts are scanned and flagged
+      const unscopedRes = runBoundaryAudit({
+        cwd: dir,
+        manifest: {
+          schema: HOLO_BOUNDARY_SCHEMA,
+          plane: 1,
+          scanSourceHttpIpc: true,
+        },
+      });
+      assert.equal(unscopedRes.ok, false);
+      assert.equal(unscopedRes.scannedFiles, 4);
+      assert.equal(unscopedRes.violations.length, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
