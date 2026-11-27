@@ -1,11 +1,54 @@
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import type { AuditStackRunResult } from './audit-stack.mts';
+import type { HardenWorkflowsDirResult } from './wf-harden.mts';
 
 export const HOLO_CI_SCHEMA = 'holo-ci.v1' as const;
 export const HOLO_CI_RECEIPT_SCHEMA = 'holo-ci.receipt.v1' as const;
 export const HOLO_V11_MANIFEST_SCHEMA = 'holo-v11.manifest.v1' as const;
 export const HOLO_BOUNDARY_SCHEMA = 'holo-boundary.v1' as const;
+export const HOLO_RULE_VIOLATION_SCHEMA = 'holo-rule-violation.v1' as const;
 export const B8G_ABI_MAGIC_V3 = '0x33564742' as const;
+
+export type HoloRuleSeverity = 'error' | 'warning' | 'info';
+export type HoloRuleCategory =
+  | 'security'
+  | 'ipc'
+  | 'geometry'
+  | 'abi'
+  | 'governance'
+  | 'workflow'
+  | 'docs'
+  | 'brand'
+  | 'telemetry';
+
+export interface HoloRuleViolation {
+  schema: typeof HOLO_RULE_VIOLATION_SCHEMA;
+  ruleId: string;
+  severity: HoloRuleSeverity;
+  category: HoloRuleCategory;
+  repo: string;
+  file: string;
+  line: number;
+  snippet: string;
+  message: string;
+  autofixable: boolean;
+  fingerprint: string;
+}
+
+export interface CreateRuleViolationInput {
+  ruleId: string;
+  severity: HoloRuleSeverity;
+  category: HoloRuleCategory;
+  repo: string;
+  file: string;
+  line?: number;
+  snippet?: string;
+  message: string;
+  autofixable?: boolean;
+  fingerprint?: string;
+}
 
 export type HoloCiKind = 'monorepo' | 'native-fork' | 'control-plane' | 'app';
 export type HoloCiPhase =
@@ -17,7 +60,9 @@ export type HoloCiPhase =
   | 'maintain'
   | 'init'
   | 'lock-compat'
-  | 'boundary-audit';
+  | 'boundary-audit'
+  | 'wf-harden'
+  | 'audit-stack';
 
 export interface HoloCiGuards {
   zeroGhost?: boolean;
@@ -360,6 +405,8 @@ export interface HoloCiReceipt {
   maintain?: HoloCiMaintainResult;
   lockCompat?: HoloCiLockCompatResult;
   boundaryAudit?: HoloCiBoundaryResult;
+  wfHarden?: HardenWorkflowsDirResult;
+  auditStack?: AuditStackRunResult;
   errors?: string[];
 }
 
@@ -462,4 +509,213 @@ export function loadManifest(configPath = 'holo-ci.json', cwd = process.cwd()): 
   const text = readFileSync(fullPath, 'utf8');
   const parsed: unknown = JSON.parse(text);
   return validateManifest(parsed);
+}
+
+/**
+ * Computes a deterministic 16-character lowercase hex SHA-256 fingerprint for a rule violation.
+ */
+export function computeViolationFingerprint(
+  ruleId: string,
+  repo: string,
+  file: string,
+  message: string,
+): string {
+  const normalizedFile = file.replace(/\\/g, '/');
+  return createHash('sha256')
+    .update(`${ruleId}\0${repo}\0${normalizedFile}\0${message}`)
+    .digest('hex')
+    .slice(0, 16);
+}
+
+/**
+ * Constructs a canonical `holo-rule-violation.v1` IR record with deterministic fingerprint.
+ */
+export function createRuleViolation(input: CreateRuleViolationInput): HoloRuleViolation {
+  const normalizedFile = input.file.replace(/\\/g, '/');
+  const line =
+    typeof input.line === 'number' && Number.isFinite(input.line) && input.line > 0
+      ? Math.trunc(input.line)
+      : 1;
+  const snippet = (input.snippet ?? '').slice(0, 160);
+  const fingerprint =
+    input.fingerprint ?? computeViolationFingerprint(input.ruleId, input.repo, normalizedFile, input.message);
+
+  return {
+    schema: HOLO_RULE_VIOLATION_SCHEMA,
+    ruleId: input.ruleId,
+    severity: input.severity,
+    category: input.category,
+    repo: input.repo,
+    file: normalizedFile,
+    line,
+    snippet,
+    message: input.message,
+    autofixable: Boolean(input.autofixable),
+    fingerprint,
+  };
+}
+
+interface GuardRuleMeta {
+  readonly ruleId: string;
+  readonly severity: HoloRuleSeverity;
+  readonly category: HoloRuleCategory;
+  readonly autofixable: boolean;
+  readonly formatMessage: (snippet: string) => string;
+}
+
+const GUARD_RULE_META: Record<HoloCiGuardViolation['guard'], GuardRuleMeta> = {
+  zeroGhost: {
+    ruleId: 'holo.brand.zero-ghost',
+    severity: 'error',
+    category: 'brand',
+    autofixable: false,
+    formatMessage: (snippet) => `Forbidden legacy ghost identifier detected: ${snippet}`,
+  },
+  zeroCasV1: {
+    ruleId: 'holo.governance.zero-cas-v1',
+    severity: 'error',
+    category: 'governance',
+    autofixable: false,
+    formatMessage: (snippet) => `Forbidden legacy CAS v1 reference detected: ${snippet}`,
+  },
+  zeroHttpIpc: {
+    ruleId: 'B8G016',
+    severity: 'error',
+    category: 'ipc',
+    autofixable: false,
+    formatMessage: (snippet) => `B8G016 violation: illegal loopback HTTP IPC binding (${snippet})`,
+  },
+  spdxLicense: {
+    ruleId: 'holo.governance.spdx-license',
+    severity: 'error',
+    category: 'governance',
+    autofixable: true,
+    formatMessage: (snippet) => snippet,
+  },
+  gitattributes: {
+    ruleId: 'holo.governance.gitattributes',
+    severity: 'error',
+    category: 'governance',
+    autofixable: true,
+    formatMessage: (snippet) => snippet,
+  },
+  codeowners: {
+    ruleId: 'holo.governance.codeowners',
+    severity: 'error',
+    category: 'governance',
+    autofixable: true,
+    formatMessage: (snippet) => snippet,
+  },
+  noBrokenBadges: {
+    ruleId: 'holo.docs.no-broken-badges',
+    severity: 'warning',
+    category: 'docs',
+    autofixable: true,
+    formatMessage: (snippet) => `Broken Shields.io badge encoding (%2F): ${snippet}`,
+  },
+  noWorkflowBloat: {
+    ruleId: 'holo.workflow.no-bloat',
+    severity: 'error',
+    category: 'workflow',
+    autofixable: false,
+    formatMessage: (snippet) => snippet,
+  },
+  requireWorkflowHardening: {
+    ruleId: 'holo.workflow.hardening',
+    severity: 'error',
+    category: 'workflow',
+    autofixable: true,
+    formatMessage: (snippet) => snippet,
+  },
+};
+
+/**
+ * Adapts a `HoloCiGuardViolation` into a universal `HoloRuleViolation` IR object.
+ */
+export function guardViolationToRuleViolation(v: HoloCiGuardViolation, repo: string): HoloRuleViolation {
+  const meta = GUARD_RULE_META[v.guard];
+  return createRuleViolation({
+    ruleId: meta.ruleId,
+    severity: meta.severity,
+    category: meta.category,
+    repo,
+    file: v.file,
+    line: v.line,
+    snippet: v.snippet,
+    message: meta.formatMessage(v.snippet),
+    autofixable: meta.autofixable,
+  });
+}
+
+interface BoundaryRuleMeta {
+  readonly ruleId: string;
+  readonly severity: HoloRuleSeverity;
+  readonly category: HoloRuleCategory;
+  readonly autofixable: boolean;
+}
+
+const BOUNDARY_RULE_META: Record<HoloCiBoundaryRule, BoundaryRuleMeta> = {
+  boundaryManifest: {
+    ruleId: 'holo.geometry.boundary-manifest',
+    severity: 'error',
+    category: 'governance',
+    autofixable: false,
+  },
+  forbiddenImport: {
+    ruleId: 'holo.geometry.forbidden-import',
+    severity: 'error',
+    category: 'geometry',
+    autofixable: false,
+  },
+  parentTraversal: {
+    ruleId: 'holo.geometry.parent-traversal',
+    severity: 'error',
+    category: 'geometry',
+    autofixable: false,
+  },
+  httpIpc: {
+    ruleId: 'B8G016',
+    severity: 'error',
+    category: 'ipc',
+    autofixable: false,
+  },
+  abiGolden: {
+    ruleId: 'holo.abi.golden',
+    severity: 'error',
+    category: 'abi',
+    autofixable: false,
+  },
+  cyclicImport: {
+    ruleId: 'holo.geometry.cyclic-import',
+    severity: 'error',
+    category: 'geometry',
+    autofixable: false,
+  },
+  layerInversion: {
+    ruleId: 'holo.geometry.layer-inversion',
+    severity: 'error',
+    category: 'geometry',
+    autofixable: false,
+  },
+};
+
+/**
+ * Adapts a `HoloCiBoundaryViolation` into a universal `HoloRuleViolation` IR object.
+ */
+export function boundaryViolationToRuleViolation(
+  v: HoloCiBoundaryViolation,
+  repo: string,
+): HoloRuleViolation {
+  const meta = BOUNDARY_RULE_META[v.rule];
+  return createRuleViolation({
+    ruleId: meta.ruleId,
+    severity: meta.severity,
+    category: meta.category,
+    repo,
+    file: v.file,
+    line: v.line,
+    snippet: v.snippet,
+    message: v.message,
+    autofixable: meta.autofixable,
+  });
 }

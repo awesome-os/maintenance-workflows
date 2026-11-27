@@ -6,7 +6,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { HOLO_BOUNDARY_SCHEMA, runBoundaryAudit, type HoloBoundaryManifest } from './boundary.mts';
+import {
+  HOLO_BOUNDARY_SCHEMA,
+  HTTP_IPC_REGEX,
+  runBoundaryAudit,
+  scanHttpIpcSource,
+  type HoloBoundaryManifest,
+} from './boundary.mts';
 import { fetchLatestUpstreamVersion, runBump, runBumpAsync } from './bump.mts';
 import { runLockCompat } from './lock-compat.mts';
 import { runMaintain, verifyBundleManifest } from './maintain.mts';
@@ -15,14 +21,19 @@ import {
   B8G_ABI_MAGIC_V3,
   HOLO_CI_RECEIPT_SCHEMA,
   HOLO_CI_SCHEMA,
+  HOLO_RULE_VIOLATION_SCHEMA,
   HOLO_V11_MANIFEST_SCHEMA,
+  boundaryViolationToRuleViolation,
   compareSemver,
+  computeViolationFingerprint,
+  createRuleViolation,
+  guardViolationToRuleViolation,
   loadManifest,
   type HoloCiManifest,
 } from './schema.mts';
 import { runSync } from './sync.mts';
 import { buildReceipt, emitTelemetry } from './telemetry.mts';
-import { runVerify, scanGuardViolations } from './verify.mts';
+import { checkRepoGovernance, runVerify, scanGuardViolations } from './verify.mts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, '..');
@@ -2185,6 +2196,277 @@ describe('holo-ci boundary-audit', () => {
       });
       assert.equal(cleanRes.ok, true);
       assert.equal(cleanRes.violations.length, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('holo-ci Velocity Kernel v1.4 (IR, B8G016 scanner, governance, wf-harden CLI)', () => {
+  it('constructs deterministic HoloRuleViolation IR records and adapts guard & boundary violations', () => {
+    const fp1 = computeViolationFingerprint('B8G016', 'awesome-os/demo', 'src\\ipc.mts', 'illegal loopback');
+    const fp2 = computeViolationFingerprint('B8G016', 'awesome-os/demo', 'src/ipc.mts', 'illegal loopback');
+    assert.equal(fp1, fp2);
+    assert.match(fp1, /^[0-9a-f]{16}$/);
+
+    const custom = createRuleViolation({
+      ruleId: 'holo.security.test',
+      severity: 'warning',
+      category: 'security',
+      repo: 'awesome-os/demo',
+      file: 'src\\main.mts',
+      line: 12,
+      snippet: 'eval(input)',
+      message: 'Unsafe eval call',
+      autofixable: false,
+    });
+    assert.equal(custom.schema, HOLO_RULE_VIOLATION_SCHEMA);
+    assert.equal(custom.file, 'src/main.mts');
+    assert.equal(custom.line, 12);
+    assert.equal(custom.autofixable, false);
+    assert.match(custom.fingerprint, /^[0-9a-f]{16}$/);
+
+    const guardIpc = guardViolationToRuleViolation(
+      {
+        guard: 'zeroHttpIpc',
+        file: '.github/workflows/ci.yml',
+        line: 8,
+        snippet: 'curl loopback',
+      },
+      'awesome-os/demo',
+    );
+    assert.equal(guardIpc.schema, HOLO_RULE_VIOLATION_SCHEMA);
+    assert.equal(guardIpc.ruleId, 'B8G016');
+    assert.equal(guardIpc.category, 'ipc');
+    assert.equal(guardIpc.severity, 'error');
+    assert.equal(guardIpc.autofixable, false);
+
+    const guardWf = guardViolationToRuleViolation(
+      {
+        guard: 'requireWorkflowHardening',
+        file: '.github/workflows/ci.yml',
+        line: 1,
+        snippet: 'Non-reusable workflow missing top-level concurrency:',
+      },
+      'awesome-os/demo',
+    );
+    assert.equal(guardWf.ruleId, 'holo.workflow.hardening');
+    assert.equal(guardWf.category, 'workflow');
+    assert.equal(guardWf.autofixable, true);
+
+    const guardBadge = guardViolationToRuleViolation(
+      {
+        guard: 'noBrokenBadges',
+        file: 'README.md',
+        line: 3,
+        snippet: 'https://img.shields.io/badge/a-1%2F2-blue',
+      },
+      'awesome-os/demo',
+    );
+    assert.equal(guardBadge.severity, 'warning');
+    assert.equal(guardBadge.category, 'docs');
+    assert.equal(guardBadge.autofixable, true);
+
+    const boundaryAbi = boundaryViolationToRuleViolation(
+      {
+        rule: 'abiGolden',
+        file: 'sections/runtime/abi-golden.json',
+        line: 1,
+        snippet: 'header: missing.h',
+        message: 'ABI golden file references missing header',
+      },
+      'awesome-os/awesome-os',
+    );
+    assert.equal(boundaryAbi.schema, HOLO_RULE_VIOLATION_SCHEMA);
+    assert.equal(boundaryAbi.ruleId, 'holo.abi.golden');
+    assert.equal(boundaryAbi.category, 'abi');
+    assert.equal(boundaryAbi.repo, 'awesome-os/awesome-os');
+
+    const boundaryCycle = boundaryViolationToRuleViolation(
+      {
+        rule: 'cyclicImport',
+        file: 'sections/a',
+        line: 1,
+        snippet: 'sections/a <-> sections/b',
+        message: 'Cycle detected',
+      },
+      'awesome-os/awesome-os',
+    );
+    assert.equal(boundaryCycle.ruleId, 'holo.geometry.cyclic-import');
+    assert.equal(boundaryCycle.category, 'geometry');
+  });
+
+  it('scanHttpIpcSource detects loopback HTTP IPC while skipping comments, regex definitions, and allow markers', () => {
+    const loopback = ['http', '://', '127.0.0.1:8080'].join('');
+    const localhost = ['http', '://', 'localhost:3000'].join('');
+    assert.equal(HTTP_IPC_REGEX.test(loopback), true);
+    assert.equal(HTTP_IPC_REGEX.test('https://api.github.com'), false);
+
+    const tsSource = [
+      `// comment mentioning ${loopback} should be ignored`,
+      `/* multi-line block comment`,
+      ` * ${localhost}`,
+      ` */`,
+      `const re = new RegExp('${loopback}', 'i');`,
+      `const safePipe = '\\\\.\\pipe\\b8g'; // replaces ${loopback}`,
+      `// b8g-allow-http-ipc`,
+      `const allowedPrev = '${loopback}';`,
+      `const allowedInline = '${localhost}'; // holo-ci-allow-guard`,
+      `export const badLoopback = '${loopback}';`,
+      `export const badLocalhost = '${localhost}/rpc';`,
+      '',
+    ].join('\n');
+
+    const tsMatches = scanHttpIpcSource(tsSource, 'src\\server.mts');
+    assert.equal(tsMatches.length, 2);
+    assert.equal(tsMatches[0]!.file, 'src/server.mts');
+    assert.equal(tsMatches[0]!.line, 10);
+    assert.equal(tsMatches[0]!.match, loopback);
+    assert.equal(tsMatches[1]!.line, 11);
+    assert.equal(tsMatches[1]!.match, localhost);
+
+    // Custom allowMarkers support + YAML # comment skipping
+    const yamlSource = [
+      `# comment with ${loopback}`,
+      `run: curl ${loopback} # custom-allow-tag`,
+      `run: curl ${localhost}`,
+      '',
+    ].join('\n');
+    const yamlMatches = scanHttpIpcSource(yamlSource, '.github/workflows/test.yml', {
+      allowMarkers: ['custom-allow-tag'],
+    });
+    assert.equal(yamlMatches.length, 1);
+    assert.equal(yamlMatches[0]!.line, 3);
+    assert.equal(yamlMatches[0]!.match, localhost);
+  });
+
+  it('checkRepoGovernance evaluates SPDX, gitattributes, codeowners, badges, bloat, and hardening in one call', () => {
+    const dir = makeTempDir('holo-ci-gov-api-');
+    try {
+      mkdirSync(join(dir, '.github', 'workflows'), { recursive: true });
+      writeFileSync(
+        join(dir, 'LICENSE'),
+        'Permission is hereby granted, free of charge\nTHE SOFTWARE IS PROVIDED "AS IS"\n',
+        'utf8',
+      );
+      writeFileSync(join(dir, '.gitattributes'), '* text=auto eol=lf\n', 'utf8');
+      writeFileSync(join(dir, '.github', 'CODEOWNERS'), '* @lemanschik\n', 'utf8');
+      writeFileSync(join(dir, 'README.md'), '# Clean Repo\n', 'utf8');
+      writeFileSync(
+        join(dir, '.github', 'workflows', 'ci.yml'),
+        [
+          'name: CI',
+          'on: [push]',
+          'jobs:',
+          '  test:',
+          '    runs-on: ubuntu-latest',
+          '    steps:',
+          '      - uses: actions/checkout@v4',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const failGov = checkRepoGovernance(dir, {
+        spdxLicense: true,
+        gitattributes: true,
+        codeowners: true,
+        noBrokenBadges: true,
+        noWorkflowBloat: true,
+        requireWorkflowHardening: true,
+      });
+      assert.equal(failGov.ok, false);
+      assert.equal(failGov.checks.spdxLicense, true);
+      assert.equal(failGov.checks.gitattributes, true);
+      assert.equal(failGov.checks.codeowners, true);
+      assert.equal(failGov.checks.noBrokenBadges, true);
+      assert.equal(failGov.checks.noWorkflowBloat, true);
+      assert.equal(failGov.checks.requireWorkflowHardening, false);
+      assert.ok(failGov.violations.length >= 3);
+      assert.ok(failGov.violations.every((v) => v.guard === 'requireWorkflowHardening'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('CLI exposes wf-harden --check and --fix subcommands delegating to wf-harden.mts', () => {
+    const cliPath = join(HERE, 'cli.mts');
+    const helpRes = spawnSync(process.execPath, [cliPath, '--help'], { encoding: 'utf8' });
+    assert.equal(helpRes.status, 0);
+    assert.match(helpRes.stdout, /wf-harden/);
+    assert.match(helpRes.stdout, /--fix/);
+    assert.match(helpRes.stdout, /--check/);
+
+    const dir = makeTempDir('holo-ci-cli-wf-harden-');
+    try {
+      mkdirSync(join(dir, '.github', 'workflows'), { recursive: true });
+      writeFileSync(
+        join(dir, '.github', 'workflows', 'ci.yml'),
+        [
+          'name: Sample CI',
+          'on: [push]',
+          'jobs:',
+          '  test:',
+          '    runs-on: ubuntu-latest',
+          '    steps:',
+          '      - uses: actions/checkout@v4',
+          '      - uses: actions/upload-artifact@v4',
+          '        with:',
+          '          name: out',
+          '          path: out/',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+
+      // Works without holo-ci.json: --check fails with structured holo-ci.receipt.v1 JSON
+      const checkRes = spawnSync(
+        process.execPath,
+        [cliPath, 'wf-harden', '--check', '--cwd', dir, '--json'],
+        { encoding: 'utf8' },
+      );
+      assert.equal(checkRes.status, 1);
+      const checkReceipt = JSON.parse(checkRes.stdout) as {
+        schema: string;
+        abiMagic: string;
+        phase: string;
+        ok: boolean;
+        wfHarden?: { mode: string; workflowsScanned: number; totalFindings: number; remainingFindings: number };
+      };
+      assert.equal(checkReceipt.schema, HOLO_CI_RECEIPT_SCHEMA);
+      assert.equal(checkReceipt.abiMagic, B8G_ABI_MAGIC_V3);
+      assert.equal(checkReceipt.phase, 'wf-harden');
+      assert.equal(checkReceipt.ok, false);
+      assert.equal(checkReceipt.wfHarden?.mode, 'check');
+      assert.equal(checkReceipt.wfHarden?.workflowsScanned, 1);
+      assert.ok((checkReceipt.wfHarden?.totalFindings ?? 0) >= 5);
+
+      // --fix autofixes in place and returns exitCode 0
+      const fixRes = spawnSync(
+        process.execPath,
+        [cliPath, 'wf-harden', '--fix', '--cwd', dir, '--json'],
+        { encoding: 'utf8' },
+      );
+      assert.equal(fixRes.status, 0, fixRes.stderr);
+      const fixReceipt = JSON.parse(fixRes.stdout) as {
+        ok: boolean;
+        wfHarden?: { mode: string; remainingFindings: number; modifiedFiles: string[] };
+      };
+      assert.equal(fixReceipt.ok, true);
+      assert.equal(fixReceipt.wfHarden?.mode, 'fix');
+      assert.equal(fixReceipt.wfHarden?.remainingFindings, 0);
+      assert.deepEqual(fixReceipt.wfHarden?.modifiedFiles, ['.github/workflows/ci.yml']);
+
+      // Re-checking after --fix passes cleanly
+      const recheckRes = spawnSync(
+        process.execPath,
+        [cliPath, 'wf-harden', '--check', '--cwd', dir, '--json'],
+        { encoding: 'utf8' },
+      );
+      assert.equal(recheckRes.status, 0, recheckRes.stderr);
+      const recheckReceipt = JSON.parse(recheckRes.stdout) as { ok: boolean; wfHarden?: { totalFindings: number } };
+      assert.equal(recheckReceipt.ok, true);
+      assert.equal(recheckReceipt.wfHarden?.totalFindings, 0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

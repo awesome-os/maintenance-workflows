@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
+import { scanHttpIpcSource, type HttpIpcScanMatch } from './boundary.mts';
 import type {
   HoloCiCommandResult,
   HoloCiDocCheckResult,
@@ -9,24 +10,34 @@ import type {
   HoloCiManifest,
   HoloCiVerifyResult,
 } from './schema.mts';
+import { auditAndHardenWorkflowYaml, auditWorkflowBloatYaml } from './wf-harden.mts';
 
 const GHOST_TOKEN = ['b8g', 'ghost'].join('-');
 const CAS_V1_TOKEN = ['cas', 'v1'].join('-');
-const LOCALHOST_HTTP_PREFIX = ['http', '://'].join('');
 
 const GHOST_REGEX = new RegExp(`\\b${GHOST_TOKEN}\\b`, 'i');
 const CAS_V1_REGEX = new RegExp(`\\b${CAS_V1_TOKEN}(?![0-9])\\b`, 'i');
-const HTTP_IPC_REGEX = new RegExp(`${LOCALHOST_HTTP_PREFIX}(?:127\\.0\\.0\\.1|localhost)(?::\\d+)?`, 'i');
 const BROKEN_SHIELDS_BADGE_REGEX = /https:\/\/img\.shields\.io\/badge\/[^\s)\]"'<>?]*%2F/i;
-const DEFAULT_MAX_WORKFLOW_LINES = 140;
-const RUN_KEY_REGEX = /^(\s*(?:-\s+)?)run\s*:\s*(.*)$/;
-const EVAL_CMD_SUB_REGEX = /\beval\s+(?:["'][^"']*)?\$\(/;
-const UNTRUSTED_GH_CONTEXT_REGEX =
-  /\$\{\{[^}]*\bgithub\.(?:head_ref|event\.(?:issue|pull_request\.(?:title|body|head\.ref|head\.label)|comment|review|review_comment|discussion)\b)[^}]*\}\}/;
-const DEPRECATED_ZIG_ACTION_REGEX = /\bgoto-bus-stop\/setup-zig@/i;
-const LEGACY_CORE_ACTION_REGEX =
-  /\bactions\/(?:checkout|setup-node|upload-artifact|download-artifact|cache(?:\/restore|\/save)?)@v[1-4](?![0-9])/i;
-const UPLOAD_ARTIFACT_USES_REGEX = /\buses\s*:\s*['"]?actions\/upload-artifact(?:@[^\s'"#]+)?/i;
+
+export interface CheckRepoGovernanceOptions {
+  extraFiles?: string[];
+  docFiles?: string[];
+}
+
+export interface RepoGovernanceChecks {
+  spdxLicense?: boolean;
+  gitattributes?: boolean;
+  codeowners?: boolean;
+  noBrokenBadges?: boolean;
+  noWorkflowBloat?: boolean;
+  requireWorkflowHardening?: boolean;
+}
+
+export interface RepoGovernanceResult {
+  ok: boolean;
+  violations: HoloCiGuardViolation[];
+  checks: RepoGovernanceChecks;
+}
 
 export function runShellCommand(
   command: string,
@@ -128,51 +139,50 @@ function collectMarkdownBadgeFiles(cwd: string, docFiles: string[] = [], extraFi
   return out;
 }
 
-export function scanGuardViolations(
-  cwd: string,
-  guards: HoloCiGuards,
-  extraFiles: string[] = [],
-  docFiles: string[] = [],
-): HoloCiGuardViolation[] {
-  const violations: HoloCiGuardViolation[] = [];
-  const files = collectGuardScanFiles(cwd, extraFiles);
-
-  for (const filePath of files) {
-    const relPath = relative(cwd, filePath).replace(/\\/g, '/');
-    const lines = readFileSync(filePath, 'utf8').split(/\r?\n/);
-
-    for (let i = 0; i < lines.length; i++) {
-      const lineText = lines[i];
-      if (isAllowlistedGuardLine(lineText, relPath)) continue;
-
-      if (guards.zeroGhost && GHOST_REGEX.test(lineText)) {
-        violations.push({
-          guard: 'zeroGhost',
-          file: relPath,
-          line: i + 1,
-          snippet: lineText.trim().slice(0, 160),
-        });
-      }
-      if (guards.zeroCasV1 && CAS_V1_REGEX.test(lineText)) {
-        violations.push({
-          guard: 'zeroCasV1',
-          file: relPath,
-          line: i + 1,
-          snippet: lineText.trim().slice(0, 160),
-        });
-      }
-      if (guards.zeroHttpIpc && HTTP_IPC_REGEX.test(lineText)) {
-        violations.push({
-          guard: 'zeroHttpIpc',
-          file: relPath,
-          line: i + 1,
-          snippet: lineText.trim().slice(0, 160),
-        });
+function collectWorkflowFiles(cwd: string, extraFiles: string[] = []): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const workflowsDir = resolve(cwd, '.github', 'workflows');
+  if (existsSync(workflowsDir)) {
+    for (const entry of readdirSync(workflowsDir, { withFileTypes: true })) {
+      if (entry.isFile() && /\.(ya?ml)$/i.test(entry.name)) {
+        const full = join(workflowsDir, entry.name);
+        if (!seen.has(full)) {
+          seen.add(full);
+          out.push(full);
+        }
       }
     }
   }
+  for (const extra of extraFiles) {
+    const full = resolve(cwd, extra);
+    const rel = relative(cwd, full).replace(/\\/g, '/');
+    if (rel.startsWith('.github/workflows/') && existsSync(full) && !seen.has(full)) {
+      seen.add(full);
+      out.push(full);
+    }
+  }
+  out.sort((a, b) => a.localeCompare(b));
+  return out;
+}
+
+/**
+ * Evaluates repository governance guards (`spdxLicense`, `gitattributes`, `codeowners`,
+ * `noBrokenBadges`, `noWorkflowBloat`, `requireWorkflowHardening`) in one reusable entrypoint.
+ * Workflow hardening and bloat auditing delegate directly to `holo-ci/wf-harden.mts`.
+ */
+export function checkRepoGovernance(
+  cwd: string,
+  guards: HoloCiGuards,
+  options: CheckRepoGovernanceOptions = {},
+): RepoGovernanceResult {
+  const violations: HoloCiGuardViolation[] = [];
+  const checks: RepoGovernanceChecks = {};
+  const extraFiles = options.extraFiles ?? [];
+  const docFiles = options.docFiles ?? [];
 
   if (guards.spdxLicense) {
+    const before = violations.length;
     const licensePath = resolve(cwd, 'LICENSE');
     if (!existsSync(licensePath)) {
       violations.push({
@@ -201,9 +211,11 @@ export function scanGuardViolations(
         });
       }
     }
+    checks.spdxLicense = violations.length === before;
   }
 
   if (guards.gitattributes) {
+    const before = violations.length;
     const gitattributesPath = resolve(cwd, '.gitattributes');
     if (!existsSync(gitattributesPath)) {
       violations.push({
@@ -223,9 +235,11 @@ export function scanGuardViolations(
         });
       }
     }
+    checks.gitattributes = violations.length === before;
   }
 
   if (guards.codeowners) {
+    const before = violations.length;
     const hasGithubCodeowners = existsSync(resolve(cwd, '.github', 'CODEOWNERS'));
     const hasRootCodeowners = existsSync(resolve(cwd, 'CODEOWNERS'));
     if (!hasGithubCodeowners && !hasRootCodeowners) {
@@ -236,9 +250,11 @@ export function scanGuardViolations(
         snippet: 'Missing .github/CODEOWNERS or CODEOWNERS file',
       });
     }
+    checks.codeowners = violations.length === before;
   }
 
   if (guards.noBrokenBadges !== false) {
+    const before = violations.length;
     const mdFiles = collectMarkdownBadgeFiles(cwd, docFiles, extraFiles);
     for (const mdPath of mdFiles) {
       const relPath = relative(cwd, mdPath).replace(/\\/g, '/');
@@ -256,293 +272,120 @@ export function scanGuardViolations(
         }
       }
     }
+    checks.noBrokenBadges = violations.length === before;
   }
 
+  const workflowFiles =
+    guards.noWorkflowBloat || guards.requireWorkflowHardening
+      ? collectWorkflowFiles(cwd, extraFiles)
+      : [];
+
   if (guards.noWorkflowBloat) {
-    const maxLines =
-      typeof guards.maxWorkflowLines === 'number' && guards.maxWorkflowLines > 0
-        ? guards.maxWorkflowLines
-        : DEFAULT_MAX_WORKFLOW_LINES;
-    const workflowFiles = files.filter((f) =>
-      relative(cwd, f).replace(/\\/g, '/').startsWith('.github/workflows/'),
-    );
+    const before = violations.length;
     for (const wfPath of workflowFiles) {
       const relPath = relative(cwd, wfPath).replace(/\\/g, '/');
       const content = readFileSync(wfPath, 'utf8');
-      const lines = content.length === 0 ? [] : content.replace(/\r?\n$/, '').split(/\r?\n/);
-
-      if (lines.length > maxLines) {
+      const findings = auditWorkflowBloatYaml(content, relPath, {
+        maxWorkflowLines: guards.maxWorkflowLines,
+        isAllowlistedLine: (lineText) => isAllowlistedGuardLine(lineText, relPath),
+      });
+      for (const finding of findings) {
         violations.push({
           guard: 'noWorkflowBloat',
-          file: relPath,
-          line: lines.length,
-          snippet: `Workflow file has ${lines.length} lines (max ${maxLines})`,
+          file: finding.file,
+          line: finding.line,
+          snippet: finding.snippet,
         });
       }
-
-      let inRunBlock = false;
-      let runKeyIndent = -1;
-      let runBlockIndent = -1;
-
-      const checkRunLine = (lineText: string, lineNumber: number): void => {
-        if (isAllowlistedGuardLine(lineText, relPath)) return;
-        if (EVAL_CMD_SUB_REGEX.test(lineText)) {
-          violations.push({
-            guard: 'noWorkflowBloat',
-            file: relPath,
-            line: lineNumber,
-            snippet: lineText.trim().slice(0, 160),
-          });
-        }
-        if (UNTRUSTED_GH_CONTEXT_REGEX.test(lineText)) {
-          violations.push({
-            guard: 'noWorkflowBloat',
-            file: relPath,
-            line: lineNumber,
-            snippet: lineText.trim().slice(0, 160),
-          });
-        }
-      };
-
-      for (let i = 0; i < lines.length; i++) {
-        const lineText = lines[i];
-        const trimmed = lineText.trim();
-
-        if (inRunBlock) {
-          if (trimmed.length === 0) continue;
-          const indent = lineText.length - lineText.trimStart().length;
-          if (indent <= runKeyIndent || (runBlockIndent !== -1 && indent < runBlockIndent)) {
-            inRunBlock = false;
-            runKeyIndent = -1;
-            runBlockIndent = -1;
-          } else {
-            if (runBlockIndent === -1) runBlockIndent = indent;
-            checkRunLine(lineText, i + 1);
-            continue;
-          }
-        }
-
-        const runMatch = RUN_KEY_REGEX.exec(lineText);
-        if (runMatch) {
-          const keyIndent = lineText.length - lineText.trimStart().length;
-          const rest = runMatch[2].trim();
-          const isBlockScalar = /^[|>][+-]?(?:\s+#.*)?$/.test(rest);
-          if (isBlockScalar) {
-            inRunBlock = true;
-            runKeyIndent = keyIndent;
-            runBlockIndent = -1;
-          } else {
-            checkRunLine(rest, i + 1);
-          }
-        }
-      }
     }
+    checks.noWorkflowBloat = violations.length === before;
   }
 
   if (guards.requireWorkflowHardening) {
-    const workflowFiles = files.filter((f) =>
-      relative(cwd, f).replace(/\\/g, '/').startsWith('.github/workflows/'),
-    );
+    const before = violations.length;
     for (const wfPath of workflowFiles) {
       const relPath = relative(cwd, wfPath).replace(/\\/g, '/');
       const content = readFileSync(wfPath, 'utf8');
-      const lines = content.length === 0 ? [] : content.replace(/\r?\n$/, '').split(/\r?\n/);
-
-      let hasTopConcurrency = false;
-      let hasWorkflowCall = false;
-      let inOnBlock = false;
-      let inJobsBlock = false;
-      let jobKeyIndent = -1;
-      let currentJob: {
-        name: string;
-        propIndent: number;
-        hasRunsOn: boolean;
-        runsOnLine: number;
-        hasTimeout: boolean;
-        stepsKeyIndent: number;
-        stepListIndent: number;
-      } | null = null;
-      const jobs: Array<NonNullable<typeof currentJob>> = [];
-
-      let activeStep: { uploadLine: number | null; hasRetention: boolean } | null = null;
-      let inRunBlock = false;
-      let runKeyIndent = -1;
-      let runBlockIndent = -1;
-
-      const flushUploadStep = (): void => {
-        if (activeStep && activeStep.uploadLine !== null && !activeStep.hasRetention) {
-          violations.push({
-            guard: 'requireWorkflowHardening',
-            file: relPath,
-            line: activeStep.uploadLine,
-            snippet: 'actions/upload-artifact step missing retention-days',
-          });
-        }
-        activeStep = null;
-      };
-
-      const flushJob = (): void => {
-        flushUploadStep();
-        if (currentJob) {
-          jobs.push(currentJob);
-          currentJob = null;
-        }
-      };
-
-      for (let i = 0; i < lines.length; i++) {
-        const lineText = lines[i];
-        const trimmed = lineText.trim();
-        if (trimmed.length === 0 || trimmed.startsWith('#')) continue;
-
-        const indent = lineText.length - lineText.trimStart().length;
-
-        if (inRunBlock) {
-          if (indent <= runKeyIndent || (runBlockIndent !== -1 && indent < runBlockIndent)) {
-            inRunBlock = false;
-            runKeyIndent = -1;
-            runBlockIndent = -1;
-          } else {
-            if (!isAllowlistedGuardLine(lineText, relPath)) {
-              if (DEPRECATED_ZIG_ACTION_REGEX.test(lineText) || LEGACY_CORE_ACTION_REGEX.test(lineText)) {
-                violations.push({
-                  guard: 'requireWorkflowHardening',
-                  file: relPath,
-                  line: i + 1,
-                  snippet: lineText.trim().slice(0, 160),
-                });
-              }
-            }
-            continue;
-          }
-        }
-
-        if (!isAllowlistedGuardLine(lineText, relPath)) {
-          if (DEPRECATED_ZIG_ACTION_REGEX.test(lineText) || LEGACY_CORE_ACTION_REGEX.test(lineText)) {
-            violations.push({
-              guard: 'requireWorkflowHardening',
-              file: relPath,
-              line: i + 1,
-              snippet: lineText.trim().slice(0, 160),
-            });
-          }
-        }
-
-        if (indent === 0) {
-          flushJob();
-          inOnBlock = false;
-          inJobsBlock = false;
-          jobKeyIndent = -1;
-
-          if (/^concurrency\s*:/.test(trimmed)) {
-            hasTopConcurrency = true;
-          } else if (/^on\s*:/.test(trimmed)) {
-            const afterOn = trimmed.replace(/^on\s*:\s*/, '').replace(/\s+#.*$/, '').trim();
-            if (afterOn.length === 0) {
-              inOnBlock = true;
-            } else if (/\bworkflow_call\b/.test(afterOn)) {
-              hasWorkflowCall = true;
-            }
-          } else if (/^jobs\s*:/.test(trimmed)) {
-            inJobsBlock = true;
-          }
-        } else if (inOnBlock) {
-          if (/^workflow_call\s*:/.test(trimmed)) {
-            hasWorkflowCall = true;
-          }
-        } else if (inJobsBlock) {
-          if (jobKeyIndent === -1) jobKeyIndent = indent;
-
-          if (indent === jobKeyIndent && /^[A-Za-z0-9_.-]+\s*:/.test(trimmed)) {
-            flushJob();
-            currentJob = {
-              name: trimmed.split(':')[0].trim(),
-              propIndent: -1,
-              hasRunsOn: false,
-              runsOnLine: i + 1,
-              hasTimeout: false,
-              stepsKeyIndent: -1,
-              stepListIndent: -1,
-            };
-            continue;
-          }
-
-          if (currentJob) {
-            if (currentJob.propIndent === -1 && indent > jobKeyIndent) {
-              currentJob.propIndent = indent;
-            }
-            if (currentJob.stepsKeyIndent !== -1 && indent <= currentJob.stepsKeyIndent && !trimmed.startsWith('-')) {
-              flushUploadStep();
-              currentJob.stepsKeyIndent = -1;
-              currentJob.stepListIndent = -1;
-            }
-            if (indent === currentJob.propIndent && currentJob.stepsKeyIndent === -1) {
-              if (/^runs-on\s*:/.test(trimmed)) {
-                currentJob.hasRunsOn = true;
-                currentJob.runsOnLine = i + 1;
-              } else if (/^timeout-minutes\s*:/.test(trimmed)) {
-                currentJob.hasTimeout = true;
-              } else if (/^steps\s*:/.test(trimmed)) {
-                currentJob.stepsKeyIndent = indent;
-              }
-            } else if (currentJob.stepsKeyIndent !== -1) {
-              if (currentJob.stepListIndent === -1 && trimmed.startsWith('-')) {
-                currentJob.stepListIndent = indent;
-              }
-              if (currentJob.stepListIndent !== -1) {
-                if (indent < currentJob.stepListIndent) {
-                  flushUploadStep();
-                } else if (indent === currentJob.stepListIndent && /^-\s+/.test(trimmed)) {
-                  flushUploadStep();
-                  activeStep = { uploadLine: null, hasRetention: false };
-                }
-                if (activeStep && !isAllowlistedGuardLine(lineText, relPath)) {
-                  const stepBody = trimmed.replace(/^-\s+/, '');
-                  if (UPLOAD_ARTIFACT_USES_REGEX.test(stepBody)) {
-                    activeStep.uploadLine = i + 1;
-                  }
-                  if (/\bretention-days\s*:/.test(stepBody)) {
-                    activeStep.hasRetention = true;
-                  }
-                }
-              }
-            }
-          }
-        }
-
-        const runMatch = RUN_KEY_REGEX.exec(lineText);
-        if (runMatch) {
-          const rest = runMatch[2].trim();
-          if (/^[|>][+-]?(?:\s+#.*)?$/.test(rest)) {
-            inRunBlock = true;
-            runKeyIndent = indent;
-            runBlockIndent = -1;
-          }
-        }
-      }
-
-      flushJob();
-
-      if (!hasWorkflowCall && !hasTopConcurrency) {
+      const audited = auditAndHardenWorkflowYaml(content, relPath, { fix: false });
+      for (const finding of audited.findings) {
+        const snippet =
+          finding.rule === 'missing-artifact-retention'
+            ? 'actions/upload-artifact step missing retention-days'
+            : finding.snippet;
         violations.push({
           guard: 'requireWorkflowHardening',
-          file: relPath,
-          line: 1,
-          snippet: 'Non-reusable workflow missing top-level concurrency:',
+          file: finding.file,
+          line: finding.line,
+          snippet,
         });
       }
+    }
+    checks.requireWorkflowHardening = violations.length === before;
+  }
 
-      for (const job of jobs) {
-        if (job.hasRunsOn && !job.hasTimeout) {
-          violations.push({
-            guard: 'requireWorkflowHardening',
-            file: relPath,
-            line: job.runsOnLine,
-            snippet: `Job "${job.name}" declares runs-on without timeout-minutes`,
-          });
+  return {
+    ok: violations.length === 0,
+    violations,
+    checks,
+  };
+}
+
+export function scanGuardViolations(
+  cwd: string,
+  guards: HoloCiGuards,
+  extraFiles: string[] = [],
+  docFiles: string[] = [],
+): HoloCiGuardViolation[] {
+  const violations: HoloCiGuardViolation[] = [];
+  const files = collectGuardScanFiles(cwd, extraFiles);
+
+  for (const filePath of files) {
+    const relPath = relative(cwd, filePath).replace(/\\/g, '/');
+    const content = readFileSync(filePath, 'utf8');
+    const lines = content.split(/\r?\n/);
+    const httpIpcByLine = new Map<number, HttpIpcScanMatch>();
+    if (guards.zeroHttpIpc) {
+      for (const match of scanHttpIpcSource(content, relPath)) {
+        if (!httpIpcByLine.has(match.line)) {
+          httpIpcByLine.set(match.line, match);
         }
       }
     }
+
+    for (let i = 0; i < lines.length; i++) {
+      const lineText = lines[i];
+      if (isAllowlistedGuardLine(lineText, relPath)) continue;
+
+      if (guards.zeroGhost && GHOST_REGEX.test(lineText)) {
+        violations.push({
+          guard: 'zeroGhost',
+          file: relPath,
+          line: i + 1,
+          snippet: lineText.trim().slice(0, 160),
+        });
+      }
+      if (guards.zeroCasV1 && CAS_V1_REGEX.test(lineText)) {
+        violations.push({
+          guard: 'zeroCasV1',
+          file: relPath,
+          line: i + 1,
+          snippet: lineText.trim().slice(0, 160),
+        });
+      }
+      const httpHit = httpIpcByLine.get(i + 1);
+      if (httpHit) {
+        violations.push({
+          guard: 'zeroHttpIpc',
+          file: relPath,
+          line: httpHit.line,
+          snippet: httpHit.snippet,
+        });
+      }
+    }
   }
+
+  const governance = checkRepoGovernance(cwd, guards, { extraFiles, docFiles });
+  violations.push(...governance.violations);
 
   return violations;
 }

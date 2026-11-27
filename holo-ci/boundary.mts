@@ -8,12 +8,189 @@ import {
   type HoloCiBoundaryResult,
   type HoloCiBoundaryViolation,
 } from './schema.mts';
-import { scanGuardViolations } from './verify.mts';
+import { checkRepoGovernance, scanGuardViolations } from './verify.mts';
 
 export { HOLO_BOUNDARY_SCHEMA, type HoloBoundaryManifest };
 
 const LOCALHOST_HTTP_PREFIX = ['http', '://'].join('');
-const HTTP_IPC_REGEX = new RegExp(`${LOCALHOST_HTTP_PREFIX}(?:127\\.0\\.0\\.1|localhost)(?::\\d+)?`, 'i');
+export const HTTP_IPC_REGEX = new RegExp(`${LOCALHOST_HTTP_PREFIX}(?:127\\.0\\.0\\.1|localhost)(?::\\d+)?`, 'i');
+
+export const DEFAULT_HTTP_IPC_ALLOW_MARKERS = ['b8g-allow-http-ipc', 'holo-ci-allow-guard'] as const;
+
+export interface HttpIpcScanMatch {
+  file: string;
+  line: number;
+  match: string;
+  snippet: string;
+}
+
+export interface ScanHttpIpcOptions {
+  allowMarkers?: readonly string[];
+}
+
+const HASH_COMMENT_FILE_REGEX = /\.(?:ya?ml|sh|bash|zsh|ps1|py|rb|toml|ini|conf|cfg|env)$/i;
+const SLASH_COMMENT_FILE_REGEX = /\.(?:mts|ts|tsx|cts|mjs|js|jsx|cjs|c|cc|cpp|cxx|h|hh|hpp|hxx|rs|go|java|kt|cs|zig)$/i;
+const REGEX_DEF_LINE_REGEX = /\bnew\s+RegExp\s*\(/;
+
+function hasAnyAllowMarker(text: string, allowMarkers: readonly string[]): boolean {
+  for (const marker of allowMarkers) {
+    if (marker.length > 0 && text.includes(marker)) return true;
+  }
+  return false;
+}
+
+function isCommentOnlyAllowLine(prevLine: string, allowMarkers: readonly string[]): boolean {
+  const trimmed = prevLine.trim();
+  if (
+    !trimmed.startsWith('//') &&
+    !trimmed.startsWith('/*') &&
+    !trimmed.startsWith('*') &&
+    !trimmed.startsWith('#')
+  ) {
+    return false;
+  }
+  return hasAnyAllowMarker(prevLine, allowMarkers);
+}
+
+function stripCommentsFromLine(
+  line: string,
+  state: { inBlockComment: boolean },
+  supportsSlashComments: boolean,
+  supportsHashComments: boolean,
+): string {
+  let out = '';
+  let i = 0;
+  let inSingle = false;
+  let inDouble = false;
+  let inTemplate = false;
+
+  while (i < line.length) {
+    const ch = line[i]!;
+    const next = line[i + 1];
+
+    if (state.inBlockComment) {
+      if (ch === '*' && next === '/') {
+        state.inBlockComment = false;
+        i += 2;
+      } else {
+        i += 1;
+      }
+      continue;
+    }
+
+    if (inSingle) {
+      out += ch;
+      if (ch === '\\' && next !== undefined) {
+        out += next;
+        i += 2;
+        continue;
+      }
+      if (ch === "'") inSingle = false;
+      i += 1;
+      continue;
+    }
+
+    if (inDouble) {
+      out += ch;
+      if (ch === '\\' && next !== undefined) {
+        out += next;
+        i += 2;
+        continue;
+      }
+      if (ch === '"') inDouble = false;
+      i += 1;
+      continue;
+    }
+
+    if (inTemplate) {
+      out += ch;
+      if (ch === '\\' && next !== undefined) {
+        out += next;
+        i += 2;
+        continue;
+      }
+      if (ch === '`') inTemplate = false;
+      i += 1;
+      continue;
+    }
+
+    if (supportsSlashComments && ch === '/' && next === '*') {
+      state.inBlockComment = true;
+      i += 2;
+      continue;
+    }
+
+    if (supportsSlashComments && ch === '/' && next === '/' && (i === 0 || line[i - 1] !== ':')) {
+      break;
+    }
+
+    if (supportsHashComments && ch === '#' && (i === 0 || /\s/.test(line[i - 1]!))) {
+      break;
+    }
+
+    if (ch === "'") {
+      inSingle = true;
+    } else if (ch === '"') {
+      inDouble = true;
+    } else if (supportsSlashComments && ch === '`') {
+      inTemplate = true;
+    }
+
+    out += ch;
+    i += 1;
+  }
+
+  return out;
+}
+
+/**
+ * Canonical `B8G016` loopback HTTP IPC scanner across Awesome-OS.
+ * Respects inline and preceding-comment allow markers (`b8g-allow-http-ipc`, `holo-ci-allow-guard`)
+ * and skips pure comments and regex definitions cleanly.
+ */
+export function scanHttpIpcSource(
+  content: string,
+  filePath: string,
+  options: ScanHttpIpcOptions = {},
+): HttpIpcScanMatch[] {
+  const allowMarkers = options.allowMarkers ?? DEFAULT_HTTP_IPC_ALLOW_MARKERS;
+  const normalizedFile = filePath.replace(/\\/g, '/');
+  const supportsHashComments = HASH_COMMENT_FILE_REGEX.test(normalizedFile);
+  const supportsSlashComments = !supportsHashComments && (SLASH_COMMENT_FILE_REGEX.test(normalizedFile) || !normalizedFile.includes('.'));
+  const lines = content.split(/\r?\n/);
+  const matches: HttpIpcScanMatch[] = [];
+  const commentState = { inBlockComment: false };
+
+  for (let i = 0; i < lines.length; i++) {
+    const lineText = lines[i]!;
+    const prevLine = i > 0 ? lines[i - 1]! : '';
+
+    // Always advance block comment state even for allowlisted lines
+    const stripped = stripCommentsFromLine(lineText, commentState, supportsSlashComments, supportsHashComments);
+    const trimmedCode = stripped.trim();
+    if (trimmedCode.length === 0) continue;
+
+    if (hasAnyAllowMarker(lineText, allowMarkers) || isCommentOnlyAllowLine(prevLine, allowMarkers)) {
+      continue;
+    }
+
+    if (REGEX_DEF_LINE_REGEX.test(trimmedCode)) {
+      continue;
+    }
+
+    const hit = HTTP_IPC_REGEX.exec(stripped);
+    if (hit) {
+      matches.push({
+        file: normalizedFile,
+        line: i + 1,
+        match: hit[0],
+        snippet: lineText.trim().slice(0, 160),
+      });
+    }
+  }
+
+  return matches;
+}
 
 const EXCLUDED_DIRS = new Set([
   '.git',
@@ -295,10 +472,13 @@ function evaluateAbiContract(
 }
 
 function evaluateGovernance(cwd: string): number {
-  const hasLicense = scanGuardViolations(cwd, { spdxLicense: true }).length === 0;
-  const hasGitattributes = scanGuardViolations(cwd, { gitattributes: true }).length === 0;
-  const hasCodeowners = scanGuardViolations(cwd, { codeowners: true }).length === 0;
-  return (hasLicense ? 7 : 0) + (hasGitattributes ? 7 : 0) + (hasCodeowners ? 6 : 0);
+  const gov = checkRepoGovernance(cwd, {
+    spdxLicense: true,
+    gitattributes: true,
+    codeowners: true,
+    noBrokenBadges: false,
+  });
+  return (gov.checks.spdxLicense ? 7 : 0) + (gov.checks.gitattributes ? 7 : 0) + (gov.checks.codeowners ? 6 : 0);
 }
 
 export function runBoundaryAudit(options: RunBoundaryAuditOptions = {}): HoloCiBoundaryResult {
@@ -365,7 +545,8 @@ export function runBoundaryAudit(options: RunBoundaryAuditOptions = {}): HoloCiB
 
   for (const filePath of sourceFiles) {
     const relPath = relative(cwd, filePath).replace(/\\/g, '/');
-    const lines = readFileSync(filePath, 'utf8').split(/\r?\n/);
+    const content = readFileSync(filePath, 'utf8');
+    const lines = content.split(/\r?\n/);
     const srcUnit = unitOfRel(relPath);
     if (!runtimeAdj.has(srcUnit)) runtimeAdj.set(srcUnit, new Set());
     const isHostFile =
@@ -443,14 +624,16 @@ export function runBoundaryAudit(options: RunBoundaryAuditOptions = {}): HoloCiB
           }
         }
       }
+    }
 
-      if (scanSourceHttpIpc && HTTP_IPC_REGEX.test(lineText)) {
+    if (scanSourceHttpIpc) {
+      for (const hit of scanHttpIpcSource(content, relPath)) {
         httpIpcCount++;
         violations.push({
           rule: 'httpIpc',
-          file: relPath,
-          line: i + 1,
-          snippet: lineText.trim().slice(0, 160),
+          file: hit.file,
+          line: hit.line,
+          snippet: hit.snippet,
           message: 'B8G016 violation: illegal loopback HTTP IPC binding in source file',
         });
       }

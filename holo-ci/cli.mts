@@ -1,6 +1,11 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  createAuditStackRegistry,
+  registerBuiltinHoloCiAudits,
+  type AuditStackMode,
+} from './audit-stack.mts';
 import { runBoundaryAudit } from './boundary.mts';
 import { runBumpAsync } from './bump.mts';
 import { runLockCompat } from './lock-compat.mts';
@@ -18,6 +23,7 @@ import {
 import { runSync } from './sync.mts';
 import { buildReceipt, emitTelemetry } from './telemetry.mts';
 import { runVerify } from './verify.mts';
+import { hardenWorkflowsInDir } from './wf-harden.mts';
 
 export interface ParsedCliArgs {
   phase: HoloCiPhase;
@@ -31,6 +37,10 @@ export interface ParsedCliArgs {
   version?: string;
   packagePath?: string;
   dryRun: boolean;
+  check: boolean;
+  fix: boolean;
+  timeoutMinutes?: number;
+  retentionDays?: number;
   fetchUpstream: boolean;
   applyPins: boolean;
   casDir?: string;
@@ -43,6 +53,11 @@ export interface ParsedCliArgs {
   name?: string;
   kind?: HoloCiKind;
   maxLockPath?: string;
+  repo?: string;
+  mode?: AuditStackMode;
+  telemetryOutPath?: string;
+  concurrency?: number;
+  onlyIds?: string[];
 }
 
 const VALID_PHASES = new Set<HoloCiPhase>([
@@ -55,6 +70,8 @@ const VALID_PHASES = new Set<HoloCiPhase>([
   'init',
   'lock-compat',
   'boundary-audit',
+  'wf-harden',
+  'audit-stack',
 ]);
 
 const VALID_ECOSYSTEMS = new Set<HoloCiLockCompatEcosystem>([
@@ -93,6 +110,8 @@ export function getHelpText(): string {
     '  init         Scaffold a starter holo-ci.json manifest in the target directory',
     '  lock-compat  Synthesize zero-copy CAS v11 lock/metadata projections (npm|cargo|uv|go|vcpkg|winget|apt|composer|rubygems|all)',
     '  boundary-audit  Run Chromium-style checkdeps & 0-100 architectural boundary audit (boundary.json)',
+    '  wf-harden    Audit or deterministically autofix GitHub Actions workflows (--check | --fix)',
+    '  audit-stack  Run pluggable programmatic audit stack (--mode fail-fast|exhaust) and emit b8g.audit-push.v1',
     '',
     'Options:',
     '  --config <path>        Path to holo-ci.json (default: holo-ci.json)',
@@ -107,7 +126,16 @@ export function getHelpText(): string {
     '  --apply-pins           Update lagged upstreamPins in holo-ci.json during `bump`',
     '  --cas-dir <dir>        Materialize CAS v11 content-addressed blobs during `pack`',
     '  --dry-run              Preview `bump` or `lock-compat` without writing files',
-    '  --out <path>           Output directory for `pack` or output lockfile for `lock-compat` (default: package-lock.json)',
+    '  --check                Audit workflows without modifying files in `wf-harden` (default)',
+    '  --fix                  Autofix workflows in-place in `wf-harden`',
+    '  --timeout-minutes <n>  Default job timeout-minutes for `wf-harden`',
+    '  --retention-days <n>   Default upload-artifact retention-days for `wf-harden`',
+    '  --repo <name>          Repository identifier for `audit-stack` (default: manifest name or cwd basename)',
+    '  --mode <mode>          Execution mode for `audit-stack`: fail-fast|exhaust (default: fail-fast)',
+    '  --telemetry-out <path> Append holo-rule-violation.v1 JSONL telemetry during `audit-stack`',
+    '  --concurrency <n>      Max concurrent audits during `audit-stack`',
+    '  --only <id1,id2>       Comma-separated audit IDs to run during `audit-stack`',
+    '  --out <path>           Output dir (`pack`), lockfile (`lock-compat`), or b8g.audit-push.v1 JSON (`audit-stack`)',
     '  --out-dir <dir>        Output directory for `lock-compat` projections (or `pack`)',
     '  --ecosystem <name>     Target ecosystem for `lock-compat`: all|npm|cargo|uv|go|vcpkg|winget|apt|composer|rubygems (aliases: php, ruby, bundler) (default: npm)',
     '  --max-lock <path>      Optional max-version-lock.json override file for `lock-compat`',
@@ -134,6 +162,10 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
   let version: string | undefined;
   let packagePath: string | undefined;
   let dryRun = false;
+  let check = true;
+  let fix = false;
+  let timeoutMinutes: number | undefined;
+  let retentionDays: number | undefined;
   let fetchUpstream = false;
   let applyPins = false;
   let casDir: string | undefined;
@@ -146,6 +178,11 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
   let name: string | undefined;
   let kind: HoloCiKind | undefined;
   let maxLockPath: string | undefined;
+  let repo: string | undefined;
+  let mode: AuditStackMode | undefined;
+  let telemetryOutPath: string | undefined;
+  let concurrency: number | undefined;
+  let onlyIds: string[] | undefined;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -169,6 +206,26 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
       packagePath = argv[++i];
     } else if (arg === '--dry-run') {
       dryRun = true;
+    } else if (arg === '--check') {
+      check = true;
+      fix = false;
+    } else if (arg === '--fix') {
+      fix = true;
+      check = false;
+    } else if (arg === '--timeout-minutes' && argv[i + 1]) {
+      const rawTimeout = argv[++i];
+      const parsedTimeout = Number(rawTimeout);
+      if (!Number.isInteger(parsedTimeout) || parsedTimeout <= 0) {
+        throw new Error(`Invalid --timeout-minutes "${rawTimeout}" (expected positive integer)`);
+      }
+      timeoutMinutes = parsedTimeout;
+    } else if (arg === '--retention-days' && argv[i + 1]) {
+      const rawRetention = argv[++i];
+      const parsedRetention = Number(rawRetention);
+      if (!Number.isInteger(parsedRetention) || parsedRetention <= 0) {
+        throw new Error(`Invalid --retention-days "${rawRetention}" (expected positive integer)`);
+      }
+      retentionDays = parsedRetention;
     } else if (arg === '--fetch-upstream') {
       fetchUpstream = true;
     } else if (arg === '--apply-pins') {
@@ -205,6 +262,28 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
       name = argv[++i];
     } else if (arg === '--kind' && argv[i + 1]) {
       kind = argv[++i] as HoloCiKind;
+    } else if (arg === '--repo' && argv[i + 1]) {
+      repo = argv[++i];
+    } else if (arg === '--mode' && argv[i + 1]) {
+      const rawMode = argv[++i];
+      if (rawMode !== 'fail-fast' && rawMode !== 'exhaust') {
+        throw new Error(`Invalid --mode "${rawMode}" (expected "fail-fast" or "exhaust")`);
+      }
+      mode = rawMode;
+    } else if (arg === '--telemetry-out' && argv[i + 1]) {
+      telemetryOutPath = argv[++i];
+    } else if (arg === '--concurrency' && argv[i + 1]) {
+      const rawConc = argv[++i];
+      const parsedConc = Number(rawConc);
+      if (!Number.isInteger(parsedConc) || parsedConc <= 0) {
+        throw new Error(`Invalid --concurrency "${rawConc}" (expected positive integer)`);
+      }
+      concurrency = parsedConc;
+    } else if (arg === '--only' && argv[i + 1]) {
+      onlyIds = argv[++i]
+        .split(',')
+        .map((id) => id.trim())
+        .filter((id) => id.length > 0);
     } else if (!arg.startsWith('-') && !phaseExplicit) {
       if (!VALID_PHASES.has(arg as HoloCiPhase)) {
         throw new Error(`Unknown phase "${arg}". Run with --help to see valid phases.`);
@@ -228,6 +307,10 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     ...(version ? { version } : {}),
     ...(packagePath ? { packagePath } : {}),
     dryRun,
+    check,
+    fix,
+    ...(timeoutMinutes !== undefined ? { timeoutMinutes } : {}),
+    ...(retentionDays !== undefined ? { retentionDays } : {}),
     fetchUpstream,
     applyPins,
     ...(casDir ? { casDir } : {}),
@@ -240,6 +323,11 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     ...(name ? { name } : {}),
     ...(kind ? { kind } : {}),
     ...(maxLockPath ? { maxLockPath } : {}),
+    ...(repo ? { repo } : {}),
+    ...(mode ? { mode } : {}),
+    ...(telemetryOutPath ? { telemetryOutPath } : {}),
+    ...(concurrency !== undefined ? { concurrency } : {}),
+    ...(onlyIds ? { onlyIds } : {}),
   };
 }
 
@@ -352,6 +440,55 @@ export async function executeCli(argv: string[]): Promise<{ exitCode: number; re
       boundaryAudit,
       ...(errors ? { errors } : {}),
     });
+  } else if (opts.phase === 'wf-harden') {
+    const wfHarden = hardenWorkflowsInDir(opts.cwd, {
+      fix: opts.fix,
+      defaultTimeoutMinutes: opts.timeoutMinutes,
+      defaultRetentionDays: opts.retentionDays,
+    });
+    const configFullPath = resolve(opts.cwd, opts.configPath);
+    const manifest: HoloCiManifest = existsSync(configFullPath)
+      ? loadManifest(opts.configPath, opts.cwd)
+      : {
+          schema: HOLO_CI_SCHEMA,
+          name: opts.name ?? basename(opts.cwd),
+          kind: opts.kind ?? 'app',
+        };
+    receipt = buildReceipt({
+      manifest,
+      phase: 'wf-harden',
+      ok: wfHarden.ok,
+      durationMs: Date.now() - start,
+      wfHarden,
+    });
+  } else if (opts.phase === 'audit-stack') {
+    const configFullPath = resolve(opts.cwd, opts.configPath);
+    const manifest: HoloCiManifest = existsSync(configFullPath)
+      ? loadManifest(opts.configPath, opts.cwd)
+      : {
+          schema: HOLO_CI_SCHEMA,
+          name: opts.repo ?? opts.name ?? basename(opts.cwd),
+          kind: opts.kind ?? 'app',
+        };
+    const registry = registerBuiltinHoloCiAudits(createAuditStackRegistry());
+    const auditStack = await registry.run({
+      cwd: opts.cwd,
+      repo: opts.repo ?? manifest.name,
+      mode: opts.mode ?? 'fail-fast',
+      ...(opts.onlyIds ? { onlyIds: opts.onlyIds } : {}),
+      ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
+      ...(opts.telemetryOutPath ? { telemetryOutPath: opts.telemetryOutPath } : {}),
+      ...(opts.outFile ? { pushOutPath: opts.outFile } : {}),
+    });
+    receipt = {
+      ...buildReceipt({
+        manifest,
+        phase: 'audit-stack',
+        ok: auditStack.ok,
+        durationMs: Date.now() - start,
+      }),
+      auditStack,
+    };
   } else {
     const manifest = loadManifest(opts.configPath, opts.cwd);
     if (opts.phase === 'verify') {

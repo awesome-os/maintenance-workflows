@@ -32,6 +32,21 @@ export const WF_HARDEN_SCHEMA = 'holo-ci.wf-harden.v1' as const;
 export const B8G_ABI_MAGIC_V3 = '0x33564742' as const;
 export const DEFAULT_TIMEOUT_MINUTES = 30;
 export const DEFAULT_RETENTION_DAYS = 7;
+export const DEFAULT_MAX_WORKFLOW_LINES = 140;
+
+export type WorkflowBloatRule = 'workflow-line-limit' | 'run-eval-subshell' | 'untrusted-gh-context';
+
+export interface WorkflowBloatFinding {
+  readonly rule: WorkflowBloatRule;
+  readonly file: string;
+  readonly line: number;
+  readonly snippet: string;
+}
+
+export interface AuditWorkflowBloatOptions {
+  readonly maxWorkflowLines?: number;
+  readonly isAllowlistedLine?: (lineText: string) => boolean;
+}
 
 export type WorkflowHardenRule =
   | 'deprecated-zig-action'
@@ -148,6 +163,9 @@ const CORE_ACTION_UPGRADE_RULES: readonly CoreActionUpgradeRule[] = [
 const UPLOAD_ARTIFACT_USES_REGEX = /\buses\s*:\s*['"]?actions\/upload-artifact(?:@[^\s'"#,}]+)?/i;
 const SENSITIVE_WORKFLOW_REGEX = /(?:deploy|publish|release|bump|autoroll)/i;
 const RUN_KEY_REGEX = /^(\s*(?:-\s+)?)run\s*:\s*(.*)$/;
+const EVAL_CMD_SUB_REGEX = /\beval\s+(?:["'][^"']*)?\$\(/;
+const UNTRUSTED_GH_CONTEXT_REGEX =
+  /\$\{\{[^}]*\bgithub\.(?:head_ref|event\.(?:issue|pull_request\.(?:title|body|head\.ref|head\.label)|comment|review|review_comment|discussion)\b)[^}]*\}\}/;
 const CANCEL_IN_PROGRESS_TRUE_REGEX = /(\bcancel-in-progress\s*:\s*)(['"]?)true\2(?=\s|$|#|,|\})/i;
 
 interface LineInsertion {
@@ -860,6 +878,92 @@ export function auditAndHardenWorkflowYaml(
 }
 
 /**
+ * Audits a single workflow YAML document for line-count bloat and unsafe shell `run:` patterns
+ * (`eval $(...)` and direct untrusted `${{ github.event.* }}` / `${{ github.head_ref }}` interpolation).
+ */
+export function auditWorkflowBloatYaml(
+  yamlText: string,
+  fileName: string,
+  options: AuditWorkflowBloatOptions = {},
+): readonly WorkflowBloatFinding[] {
+  const maxLines =
+    typeof options.maxWorkflowLines === 'number' && options.maxWorkflowLines > 0
+      ? options.maxWorkflowLines
+      : DEFAULT_MAX_WORKFLOW_LINES;
+  const allowCheck = options.isAllowlistedLine ?? isAllowlistedLine;
+  const lines = yamlText.length === 0 ? [] : yamlText.replace(/\r?\n$/, '').split(/\r?\n/);
+  const findings: WorkflowBloatFinding[] = [];
+
+  if (lines.length > maxLines) {
+    findings.push({
+      rule: 'workflow-line-limit',
+      file: fileName,
+      line: lines.length,
+      snippet: `Workflow file has ${lines.length} lines (max ${maxLines})`,
+    });
+  }
+
+  let inRunBlock = false;
+  let runKeyIndent = -1;
+  let runBlockIndent = -1;
+
+  const checkRunLine = (lineText: string, lineNumber: number): void => {
+    if (allowCheck(lineText)) return;
+    if (EVAL_CMD_SUB_REGEX.test(lineText)) {
+      findings.push({
+        rule: 'run-eval-subshell',
+        file: fileName,
+        line: lineNumber,
+        snippet: lineText.trim().slice(0, 160),
+      });
+    }
+    if (UNTRUSTED_GH_CONTEXT_REGEX.test(lineText)) {
+      findings.push({
+        rule: 'untrusted-gh-context',
+        file: fileName,
+        line: lineNumber,
+        snippet: lineText.trim().slice(0, 160),
+      });
+    }
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const lineText = lines[i]!;
+    const trimmed = lineText.trim();
+
+    if (inRunBlock) {
+      if (trimmed.length === 0) continue;
+      const indent = lineText.length - lineText.trimStart().length;
+      if (indent <= runKeyIndent || (runBlockIndent !== -1 && indent < runBlockIndent)) {
+        inRunBlock = false;
+        runKeyIndent = -1;
+        runBlockIndent = -1;
+      } else {
+        if (runBlockIndent === -1) runBlockIndent = indent;
+        checkRunLine(lineText, i + 1);
+        continue;
+      }
+    }
+
+    const runMatch = RUN_KEY_REGEX.exec(lineText);
+    if (runMatch) {
+      const keyIndent = lineText.length - lineText.trimStart().length;
+      const rest = runMatch[2]!.trim();
+      const isBlockScalar = /^[|>][+-]?(?:\s+#.*)?$/.test(rest);
+      if (isBlockScalar) {
+        inRunBlock = true;
+        runKeyIndent = keyIndent;
+        runBlockIndent = -1;
+      } else {
+        checkRunLine(rest, i + 1);
+      }
+    }
+  }
+
+  return findings;
+}
+
+/**
  * Scans `.github/workflows/*.{yml,yaml}` under `repoDir` and audits or autofixes every workflow.
  */
 export function hardenWorkflowsInDir(
@@ -916,6 +1020,9 @@ export function hardenWorkflowsInDir(
     files,
   };
 }
+
+/** Canonical alias for `hardenWorkflowsInDir`. */
+export const runWorkflowHardening = hardenWorkflowsInDir;
 
 export interface ParsedWfHardenCliArgs {
   readonly fix: boolean;

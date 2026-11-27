@@ -20,6 +20,7 @@ export interface BuildReceiptInput {
   maintain?: HoloCiReceipt['maintain'];
   lockCompat?: HoloCiReceipt['lockCompat'];
   boundaryAudit?: HoloCiReceipt['boundaryAudit'];
+  wfHarden?: HoloCiReceipt['wfHarden'];
   errors?: string[];
 }
 
@@ -40,6 +41,7 @@ export function buildReceipt(input: BuildReceiptInput): HoloCiReceipt {
     ...(input.maintain ? { maintain: input.maintain } : {}),
     ...(input.lockCompat ? { lockCompat: input.lockCompat } : {}),
     ...(input.boundaryAudit ? { boundaryAudit: input.boundaryAudit } : {}),
+    ...(input.wfHarden ? { wfHarden: input.wfHarden } : {}),
     ...(input.errors && input.errors.length > 0 ? { errors: input.errors } : {}),
   };
 }
@@ -113,6 +115,13 @@ export function formatStepSummaryMarkdown(receipt: HoloCiReceipt): string {
     lines.push(
       `| Boundary Audit | **${ba.score}/100** (files=${ba.scannedFiles}, manifest=${ba.manifestFound ? (ba.boundaryPath ?? 'yes') : 'default'}, violations=${ba.violations.length}) |`,
       `| Boundary Axes | Purity ${a.dependencyPurity}/20 · Encap ${a.encapsulation}/20 · IPC ${a.ipcCompliance}/20 · ABI ${a.abiContract}/20 · Gov ${a.governance}/20 |`,
+    );
+  }
+
+  if (receipt.wfHarden) {
+    const wf = receipt.wfHarden;
+    lines.push(
+      `| Workflow Hardening | mode=\`${wf.mode}\` · ${wf.workflowsScanned} workflows · findings=${wf.totalFindings} · fixed=${wf.totalFixesApplied} · remaining=${wf.remainingFindings} |`,
     );
   }
 
