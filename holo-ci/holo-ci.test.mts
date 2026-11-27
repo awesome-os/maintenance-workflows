@@ -205,6 +205,66 @@ describe('holo-ci verify & guards', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('enforces noBrokenBadges on README.md and config.docs by rejecting %2F in Shields.io badge paths', () => {
+    const dir = makeTempDir('holo-ci-badges-');
+    try {
+      mkdirSync(join(dir, 'docs'), { recursive: true });
+      writeFileSync(
+        join(dir, 'README.md'),
+        [
+          '# Demo Repo',
+          '[![OK](https://img.shields.io/badge/Telemetry-68_of_68_Upstream_Libs-D29922?style=for-the-badge)](https://awesome-os.github.io/holo-v11/oversight.html)',
+          '[![Broken](https://img.shields.io/badge/Telemetry-60%2F60_Upstream_Libs-D29922?style=for-the-badge)](https://awesome-os.github.io/holo-v11/oversight.html)',
+          '[![Allowlisted](https://img.shields.io/badge/Legacy-1%2F2-blue)<!-- holo-ci-allow-guard -->](https://example.com)',
+        ].join('\n'),
+        'utf8',
+      );
+      writeFileSync(
+        join(dir, 'docs', 'status.md'),
+        '[![DocBroken](https://img.shields.io/badge/Docs-10%2F10-green)](https://example.com)\n',
+        'utf8',
+      );
+
+      const manifest: HoloCiManifest = {
+        schema: HOLO_CI_SCHEMA,
+        name: 'badge-test',
+        kind: 'app',
+        docs: ['README.md', 'docs/status.md'],
+        guards: { zeroGhost: true },
+      };
+
+      const res = runVerify(manifest, { cwd: dir, skipTests: true, skipGates: true });
+      assert.equal(res.ok, false);
+      assert.equal(res.guardViolations.length, 2);
+      assert.deepEqual(
+        res.guardViolations.map((v) => [v.guard, v.file, v.line]),
+        [
+          ['noBrokenBadges', 'README.md', 3],
+          ['noBrokenBadges', 'docs/status.md', 1],
+        ],
+      );
+
+      const optedOut = runVerify(
+        { ...manifest, guards: { zeroGhost: true, noBrokenBadges: false } },
+        { cwd: dir, skipTests: true, skipGates: true },
+      );
+      assert.equal(optedOut.ok, true);
+      assert.equal(optedOut.guardViolations.length, 0);
+
+      writeFileSync(
+        join(dir, 'README.md'),
+        '[![Clean](https://img.shields.io/badge/Telemetry-68_of_68_Upstream_Libs-D29922?style=for-the-badge)](https://awesome-os.github.io/holo-v11/oversight.html)\n',
+        'utf8',
+      );
+      writeFileSync(join(dir, 'docs', 'status.md'), '# Clean\n', 'utf8');
+      const clean = runVerify(manifest, { cwd: dir, skipTests: true, skipGates: true });
+      assert.equal(clean.ok, true);
+      assert.equal(clean.guardViolations.length, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('holo-ci sync', () => {

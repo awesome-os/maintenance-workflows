@@ -26,6 +26,7 @@ export interface HoloCiGuards {
   spdxLicense?: boolean;
   gitattributes?: boolean;
   codeowners?: boolean;
+  noBrokenBadges?: boolean;
 }
 
 export interface HoloCiSyncPair {
@@ -90,7 +91,14 @@ export interface HoloCiDocCheckResult {
 }
 
 export interface HoloCiGuardViolation {
-  guard: 'zeroGhost' | 'zeroCasV1' | 'zeroHttpIpc' | 'spdxLicense' | 'gitattributes' | 'codeowners';
+  guard:
+    | 'zeroGhost'
+    | 'zeroCasV1'
+    | 'zeroHttpIpc'
+    | 'spdxLicense'
+    | 'gitattributes'
+    | 'codeowners'
+    | 'noBrokenBadges';
   file: string;
   line: number;
   snippet: string;

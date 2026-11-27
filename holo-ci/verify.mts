@@ -17,6 +17,7 @@ const LOCALHOST_HTTP_PREFIX = ['http', '://'].join('');
 const GHOST_REGEX = new RegExp(`\\b${GHOST_TOKEN}\\b`, 'i');
 const CAS_V1_REGEX = new RegExp(`\\b${CAS_V1_TOKEN}(?![0-9])\\b`, 'i');
 const HTTP_IPC_REGEX = new RegExp(`${LOCALHOST_HTTP_PREFIX}(?:127\\.0\\.0\\.1|localhost)(?::\\d+)?`, 'i');
+const BROKEN_SHIELDS_BADGE_REGEX = /https:\/\/img\.shields\.io\/badge\/[^\s)\]"'<>?]*%2F/i;
 
 export function runShellCommand(
   command: string,
@@ -81,7 +82,7 @@ function isAllowlistedGuardLine(lineText: string, relPath: string): boolean {
 
   // Exclude guard configuration keys in JSON manifests
   if (relPath.endsWith('holo-ci.json') || relPath.endsWith('package.json')) {
-    if (/^\s*"(zeroGhost|zeroCasV1|zeroHttpIpc|spdxLicense|gitattributes|codeowners)"\s*:/.test(lineText)) {
+    if (/^\s*"(zeroGhost|zeroCasV1|zeroHttpIpc|spdxLicense|gitattributes|codeowners|noBrokenBadges)"\s*:/.test(lineText)) {
       return true;
     }
   }
@@ -99,10 +100,26 @@ function isAllowlistedGuardLine(lineText: string, relPath: string): boolean {
   return false;
 }
 
+function collectMarkdownBadgeFiles(cwd: string, docFiles: string[] = [], extraFiles: string[] = []): string[] {
+  const seen = new Set<string>();
+  const candidates = [...docFiles, 'README.md', ...extraFiles.filter((f) => /\.mdx?$/i.test(f))];
+  const out: string[] = [];
+  for (const rel of candidates) {
+    if (!/\.mdx?$/i.test(rel)) continue;
+    const full = resolve(cwd, rel);
+    if (!seen.has(full) && existsSync(full)) {
+      seen.add(full);
+      out.push(full);
+    }
+  }
+  return out;
+}
+
 export function scanGuardViolations(
   cwd: string,
   guards: HoloCiGuards,
   extraFiles: string[] = [],
+  docFiles: string[] = [],
 ): HoloCiGuardViolation[] {
   const violations: HoloCiGuardViolation[] = [];
   const files = collectGuardScanFiles(cwd, extraFiles);
@@ -208,6 +225,26 @@ export function scanGuardViolations(
     }
   }
 
+  if (guards.noBrokenBadges !== false) {
+    const mdFiles = collectMarkdownBadgeFiles(cwd, docFiles, extraFiles);
+    for (const mdPath of mdFiles) {
+      const relPath = relative(cwd, mdPath).replace(/\\/g, '/');
+      const lines = readFileSync(mdPath, 'utf8').split(/\r?\n/);
+      for (let i = 0; i < lines.length; i++) {
+        const lineText = lines[i];
+        if (isAllowlistedGuardLine(lineText, relPath)) continue;
+        if (BROKEN_SHIELDS_BADGE_REGEX.test(lineText)) {
+          violations.push({
+            guard: 'noBrokenBadges',
+            file: relPath,
+            line: i + 1,
+            snippet: lineText.trim().slice(0, 160),
+          });
+        }
+      }
+    }
+  }
+
   return violations;
 }
 
@@ -237,7 +274,12 @@ export function runVerify(
     docs.push({ path: docPath, exists: existsSync(full) });
   }
 
-  const guardViolations = scanGuardViolations(cwd, manifest.guards ?? {}, options.extraScanFiles);
+  const guardViolations = scanGuardViolations(
+    cwd,
+    manifest.guards ?? {},
+    options.extraScanFiles,
+    manifest.docs ?? [],
+  );
 
   const ok =
     tests.every((t) => t.ok) &&

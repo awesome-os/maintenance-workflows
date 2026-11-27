@@ -84,7 +84,7 @@ export function getHelpText(): string {
     '  node holo-ci/cli.mts <phase> [options]',
     '',
     'Phases:',
-    '  verify       Run tests, nativeGates, doc checks, and zeroGhost/zeroCasV1/zeroHttpIpc guards',
+    '  verify       Run tests, nativeGates, doc checks, and zeroGhost/zeroCasV1/zeroHttpIpc/noBrokenBadges guards',
     '  sync         Compare recursive SHA-256 syncPairs and audit git working-tree status',
     '  bump         Check upstream semver pins (pinned >= upstream) and bump package.json (--version)',
     '  pack         Generate deterministic holo-v11-manifest.json & SHA512SUMS.txt with dedup stats',
@@ -273,6 +273,7 @@ function initManifest(opts: ParsedCliArgs): HoloCiManifest {
       zeroGhost: true,
       zeroCasV1: true,
       zeroHttpIpc: true,
+      noBrokenBadges: true,
     },
   };
 
