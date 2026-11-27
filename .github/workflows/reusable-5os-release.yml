@@ -31,6 +31,11 @@ on:
         required: false
         default: ''
         type: string
+      acceptance-notebook:
+        description: 'Optional Markdown acceptance notebook path to verify via b8g-notebook before release'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -113,6 +118,12 @@ jobs:
 
           (cd dist && sha256sum * > SHA256SUMS.txt)
           ls -lh dist/
+
+      - name: Verify acceptance notebook
+        if: ${{ inputs.acceptance-notebook != '' }}
+        env:
+          ACCEPTANCE_NOTEBOOK: ${{ inputs.acceptance-notebook }}
+        run: if [ -f intersections/docs-reader/cli.host.mts ]; then node intersections/docs-reader/cli.host.mts --verify "$ACCEPTANCE_NOTEBOOK" --tier tier1 --json > acceptance-receipt.json; fi
 
       - name: Publish GitHub Release
         env:

@@ -39,6 +39,11 @@ export const BUILTIN_HOLO_CI_AUDIT_IDS = [
   'holo-ci/erasable-syntax',
   'holo-ci/secret-scan',
   'holo-ci/no-broken-local-links',
+  'holo-ci/dead-exports',
+  'holo-ci/binary-budget',
+  'holo-ci/test-hermeticity',
+  'holo-ci/spdx-header',
+  'holo-ci/abi-surface',
 ] as const;
 
 export type AuditStackMode = 'fail-fast' | 'exhaust';
@@ -919,8 +924,522 @@ function scanBrokenLocalLinkViolations(ctx: ProgrammaticAuditContext): HoloRuleV
   return violations;
 }
 
+function stripCommentsPreservingNewlines(source: string): string {
+  const out: string[] = [];
+  let i = 0;
+  const len = source.length;
+  while (i < len) {
+    const ch = source[i]!;
+    const next = i + 1 < len ? source[i + 1]! : '';
+
+    if (ch === '/' && next === '/') {
+      out.push('  ');
+      i += 2;
+      while (i < len && source[i] !== '\n') {
+        out.push(' ');
+        i++;
+      }
+      continue;
+    }
+
+    if (ch === '/' && next === '*') {
+      out.push('  ');
+      i += 2;
+      while (i < len) {
+        if (source[i] === '*' && i + 1 < len && source[i + 1] === '/') {
+          out.push('  ');
+          i += 2;
+          break;
+        }
+        out.push(source[i] === '\n' ? '\n' : ' ');
+        i++;
+      }
+      continue;
+    }
+
+    if (ch === '\'' || ch === '"' || ch === '`') {
+      const quote = ch;
+      out.push(ch);
+      i++;
+      while (i < len) {
+        const cur = source[i]!;
+        out.push(cur);
+        if (cur === '\\' && i + 1 < len) {
+          out.push(source[i + 1]!);
+          i += 2;
+          continue;
+        }
+        if (cur === quote) {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+
+    out.push(ch);
+    i++;
+  }
+  return out.join('');
+}
+
+function resolveRelativeModuleTarget(fromAbsFile: string, specifier: string): boolean {
+  const cleanSpec = specifier.split('?')[0]!.split('#')[0]!;
+  if (cleanSpec.length === 0) return true;
+  const baseTarget = resolve(dirname(fromAbsFile), cleanSpec);
+  try {
+    if (existsSync(baseTarget) && statSync(baseTarget).isFile()) {
+      return true;
+    }
+  } catch {
+    // Continue to extension probing
+  }
+  if (extname(baseTarget) === '') {
+    const candidates = [
+      `${baseTarget}.mts`,
+      `${baseTarget}.ts`,
+      `${baseTarget}.mjs`,
+      `${baseTarget}.js`,
+      resolve(baseTarget, 'index.mts'),
+      resolve(baseTarget, 'index.ts'),
+      resolve(baseTarget, 'index.mjs'),
+      resolve(baseTarget, 'index.js'),
+    ];
+    for (const candidate of candidates) {
+      try {
+        if (existsSync(candidate) && statSync(candidate).isFile()) {
+          return true;
+        }
+      } catch {
+        // Ignore stat errors
+      }
+    }
+  }
+  return false;
+}
+
+function scanDeadExportsViolations(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
+  const files = walkRepoFiles(ctx.cwd, ctx.signal);
+  const violations: HoloRuleViolation[] = [];
+  const reExportRegex =
+    /^[ \t]*export(?:\s+type)?\s+(?:\*(?:\s+as\s+[A-Za-z_$][\w$]*)?|\{[\s\S]*?\})\s+from\s+(['"])(\.{1,2}\/[^'"]+)\1/gm;
+
+  for (const relFile of files) {
+    if (ctx.signal.aborted) return violations;
+    if (!relFile.endsWith('.mts') && !relFile.endsWith('.ts')) continue;
+    if (relFile.endsWith('.d.mts') || relFile.endsWith('.d.ts')) continue;
+
+    const absFile = resolve(ctx.cwd, relFile);
+    let raw: string;
+    try {
+      if (statSync(absFile).size > MAX_SCAN_FILE_BYTES) continue;
+      raw = readFileSync(absFile, 'utf8');
+    } catch {
+      continue;
+    }
+
+    const stripped = stripCommentsPreservingNewlines(raw);
+    const rawLines = raw.split(/\r?\n/);
+    reExportRegex.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = reExportRegex.exec(stripped)) !== null) {
+      const specifier = match[2]!;
+      if (!resolveRelativeModuleTarget(absFile, specifier)) {
+        const line = lineNumberAtOffset(stripped, match.index);
+        const snippet = (rawLines[line - 1] ?? '').trim().slice(0, 160);
+        violations.push(
+          createRuleViolation({
+            ruleId: 'B8G-DEAD-EXPORT',
+            severity: 'error',
+            category: 'geometry',
+            repo: ctx.repo,
+            file: relFile,
+            line,
+            snippet,
+            message: `Dead barrel re-export target "${specifier}" does not exist on disk`,
+            autofixable: false,
+          }),
+        );
+      }
+    }
+  }
+
+  return violations;
+}
+
+const DEFAULT_BINARY_BUDGET_BYTES = 512 * 1024;
+const BINARY_BUDGET_EXTENSIONS = new Set(['.b8p', '.wasm', '.so', '.dll', '.exe']);
+
+function resolveBinaryBudgetBytes(cwd: string): number {
+  const manifestPath = resolve(cwd, 'holo-ci.json');
+  if (!existsSync(manifestPath)) return DEFAULT_BINARY_BUDGET_BYTES;
+  try {
+    const parsed = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+    if (typeof parsed.binaryBudgetBytes === 'number' && Number.isFinite(parsed.binaryBudgetBytes) && parsed.binaryBudgetBytes > 0) {
+      return Math.trunc(parsed.binaryBudgetBytes);
+    }
+    if (typeof parsed.binaryBudgetKb === 'number' && Number.isFinite(parsed.binaryBudgetKb) && parsed.binaryBudgetKb > 0) {
+      return Math.trunc(parsed.binaryBudgetKb * 1024);
+    }
+  } catch {
+    // Fallback to default 512 KB budget
+  }
+  return DEFAULT_BINARY_BUDGET_BYTES;
+}
+
+function scanBinaryBudgetViolations(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
+  const budgetBytes = resolveBinaryBudgetBytes(ctx.cwd);
+  const distDirs: string[] = [];
+
+  const rootDist = resolve(ctx.cwd, 'dist');
+  if (existsSync(rootDist)) {
+    distDirs.push(rootDist);
+  }
+
+  const sectionsDir = resolve(ctx.cwd, 'sections');
+  if (existsSync(sectionsDir)) {
+    try {
+      const sectionEntries = readdirSync(sectionsDir, { withFileTypes: true }).sort((a, b) =>
+        a.name.localeCompare(b.name),
+      );
+      for (const entry of sectionEntries) {
+        if (!entry.isDirectory()) continue;
+        const sectionDist = resolve(sectionsDir, entry.name, 'dist');
+        if (existsSync(sectionDist)) {
+          distDirs.push(sectionDist);
+        }
+      }
+    } catch {
+      // Ignore unreadable sections dir
+    }
+  }
+
+  const violations: HoloRuleViolation[] = [];
+  const emptySkipDirs = new Set<string>();
+
+  for (const distDir of distDirs) {
+    if (ctx.signal.aborted) return violations;
+    const relFiles = walkRepoFiles(distDir, ctx.signal, emptySkipDirs);
+    for (const relInDist of relFiles) {
+      if (ctx.signal.aborted) return violations;
+      const ext = extname(relInDist).toLowerCase();
+      if (!BINARY_BUDGET_EXTENSIONS.has(ext)) continue;
+
+      const absArtifact = resolve(distDir, relInDist);
+      let size = 0;
+      try {
+        size = statSync(absArtifact).size;
+      } catch {
+        continue;
+      }
+
+      if (size > budgetBytes) {
+        const relFromRoot = relative(ctx.cwd, absArtifact).replaceAll('\\', '/');
+        violations.push(
+          createRuleViolation({
+            ruleId: 'B8G-BINARY-BUDGET',
+            severity: 'error',
+            category: 'abi',
+            repo: ctx.repo,
+            file: relFromRoot,
+            line: 1,
+            snippet: `${size} bytes > ${budgetBytes} bytes`,
+            message: `Compiled artifact "${relFromRoot}" (${size} bytes) exceeds ${budgetBytes}-byte binary budget`,
+            autofixable: false,
+          }),
+        );
+      }
+    }
+  }
+
+  return violations;
+}
+
+function scanTestHermeticityViolations(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
+  const files = walkRepoFiles(ctx.cwd, ctx.signal);
+  const violations: HoloRuleViolation[] = [];
+  const writeCallRegex = /\b(?:writeFileSync|appendFileSync|mkdirSync|writeFile|appendFile|mkdir)\s*\(/g;
+  const directArgRegex = /^\s*(?:['"][^'"]+['"]|(?:join|resolve)\s*\(\s*(?:process\.cwd\(\)|REPO_ROOT)\s*,)/;
+  const tmpIsolationRegex = /\b(?:tmpdir|mkdtempSync|mkdtemp)\b/;
+  const cleanupRegex = /\b(?:rmSync|rm|rmdirSync)\b/;
+
+  for (const relFile of files) {
+    if (ctx.signal.aborted) return violations;
+    if (!relFile.endsWith('.test.mts')) continue;
+
+    const absFile = resolve(ctx.cwd, relFile);
+    let raw: string;
+    try {
+      if (statSync(absFile).size > MAX_SCAN_FILE_BYTES) continue;
+      raw = readFileSync(absFile, 'utf8');
+    } catch {
+      continue;
+    }
+
+    const stripped = stripTsCommentsAndStrings(raw);
+    writeCallRegex.lastIndex = 0;
+    const firstWrite = writeCallRegex.exec(stripped);
+    if (!firstWrite) continue;
+
+    const rawLines = raw.split(/\r?\n/);
+    const hasIsolation = tmpIsolationRegex.test(stripped) && cleanupRegex.test(stripped);
+
+    if (!hasIsolation) {
+      const line = lineNumberAtOffset(stripped, firstWrite.index);
+      const snippet = (rawLines[line - 1] ?? '').trim().slice(0, 160);
+      violations.push(
+        createRuleViolation({
+          ruleId: 'B8G-TEST-HERMETICITY',
+          severity: 'error',
+          category: 'governance',
+          repo: ctx.repo,
+          file: relFile,
+          line,
+          snippet,
+          message: 'Test performs filesystem writes without os.tmpdir()/mkdtempSync isolation and rmSync cleanup',
+          autofixable: false,
+        }),
+      );
+      continue;
+    }
+
+    writeCallRegex.lastIndex = 0;
+    let callMatch: RegExpExecArray | null;
+    while ((callMatch = writeCallRegex.exec(stripped)) !== null) {
+      const argSlice = raw.slice(callMatch.index + callMatch[0].length, callMatch.index + callMatch[0].length + 120);
+      if (directArgRegex.test(argSlice)) {
+        const line = lineNumberAtOffset(stripped, callMatch.index);
+        const snippet = (rawLines[line - 1] ?? '').trim().slice(0, 160);
+        violations.push(
+          createRuleViolation({
+            ruleId: 'B8G-TEST-HERMETICITY',
+            severity: 'error',
+            category: 'governance',
+            repo: ctx.repo,
+            file: relFile,
+            line,
+            snippet,
+            message: 'Test writes directly to a relative/working-tree path instead of an isolated os.tmpdir() directory',
+            autofixable: false,
+          }),
+        );
+      }
+    }
+  }
+
+  return violations;
+}
+
+const ALLOWED_SPDX_LICENSES = new Set(['BSD-3-Clause', 'MIT', 'Apache-2.0']);
+
+function detectLicenseSpdxFromText(raw: string): string | null {
+  if (/SPDX-License-Identifier:\s*BSD-3-Clause\b/i.test(raw) || /Redistribution and use in source and binary forms/i.test(raw)) {
+    return 'BSD-3-Clause';
+  }
+  if (/SPDX-License-Identifier:\s*MIT\b/i.test(raw) || /MIT License/i.test(raw) || /Permission is hereby granted, free of charge/i.test(raw)) {
+    return 'MIT';
+  }
+  if (/SPDX-License-Identifier:\s*Apache-2\.0\b/i.test(raw) || (/Apache License/i.test(raw) && /Version 2\.0/i.test(raw))) {
+    return 'Apache-2.0';
+  }
+  return null;
+}
+
+function scanSpdxHeaderViolations(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
+  const violations: HoloRuleViolation[] = [];
+  const licensePath = resolve(ctx.cwd, 'LICENSE');
+  let detectedLicense: string | null = null;
+
+  if (!existsSync(licensePath)) {
+    violations.push(
+      createRuleViolation({
+        ruleId: 'B8G-SPDX-LICENSE',
+        severity: 'error',
+        category: 'governance',
+        repo: ctx.repo,
+        file: 'LICENSE',
+        line: 1,
+        snippet: 'missing LICENSE',
+        message: 'Root LICENSE file is missing (expected BSD-3-Clause, MIT, or Apache-2.0)',
+        autofixable: false,
+      }),
+    );
+  } else {
+    try {
+      const licenseRaw = readFileSync(licensePath, 'utf8');
+      detectedLicense = detectLicenseSpdxFromText(licenseRaw);
+      if (detectedLicense === null) {
+        violations.push(
+          createRuleViolation({
+            ruleId: 'B8G-SPDX-LICENSE',
+            severity: 'error',
+            category: 'governance',
+            repo: ctx.repo,
+            file: 'LICENSE',
+            line: 1,
+            snippet: licenseRaw.split(/\r?\n/, 1)[0]?.trim().slice(0, 160) ?? '',
+            message: 'Root LICENSE does not match an approved SPDX license (BSD-3-Clause, MIT, Apache-2.0)',
+            autofixable: false,
+          }),
+        );
+      }
+    } catch {
+      violations.push(
+        createRuleViolation({
+          ruleId: 'B8G-SPDX-LICENSE',
+          severity: 'error',
+          category: 'governance',
+          repo: ctx.repo,
+          file: 'LICENSE',
+          line: 1,
+          snippet: 'unreadable LICENSE',
+          message: 'Unable to read root LICENSE file',
+          autofixable: false,
+        }),
+      );
+    }
+  }
+
+  const pkgPath = resolve(ctx.cwd, 'package.json');
+  if (existsSync(pkgPath)) {
+    try {
+      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as Record<string, unknown>;
+      const pkgLicense = typeof pkg.license === 'string' ? pkg.license.trim() : '';
+      if (pkgLicense.length === 0) {
+        violations.push(
+          createRuleViolation({
+            ruleId: 'B8G-SPDX-LICENSE',
+            severity: 'error',
+            category: 'governance',
+            repo: ctx.repo,
+            file: 'package.json',
+            line: 1,
+            snippet: '"license": <missing>',
+            message: 'package.json is missing an SPDX "license" field (BSD-3-Clause, MIT, or Apache-2.0)',
+            autofixable: false,
+          }),
+        );
+      } else if (!ALLOWED_SPDX_LICENSES.has(pkgLicense)) {
+        violations.push(
+          createRuleViolation({
+            ruleId: 'B8G-SPDX-LICENSE',
+            severity: 'error',
+            category: 'governance',
+            repo: ctx.repo,
+            file: 'package.json',
+            line: 1,
+            snippet: `"license": "${pkgLicense}"`,
+            message: `package.json "license" ("${pkgLicense}") is not in approved SPDX set (BSD-3-Clause, MIT, Apache-2.0)`,
+            autofixable: false,
+          }),
+        );
+      } else if (detectedLicense !== null && pkgLicense !== detectedLicense) {
+        violations.push(
+          createRuleViolation({
+            ruleId: 'B8G-SPDX-LICENSE',
+            severity: 'error',
+            category: 'governance',
+            repo: ctx.repo,
+            file: 'package.json',
+            line: 1,
+            snippet: `"license": "${pkgLicense}" !== LICENSE (${detectedLicense})`,
+            message: `package.json "license" ("${pkgLicense}") does not match root LICENSE ("${detectedLicense}")`,
+            autofixable: false,
+          }),
+        );
+      }
+    } catch {
+      violations.push(
+        createRuleViolation({
+          ruleId: 'B8G-SPDX-LICENSE',
+          severity: 'error',
+          category: 'governance',
+          repo: ctx.repo,
+          file: 'package.json',
+          line: 1,
+          snippet: 'invalid package.json',
+          message: 'Unable to parse package.json for SPDX license verification',
+          autofixable: false,
+        }),
+      );
+    }
+  }
+
+  return violations;
+}
+
+function scanAbiSurfaceViolations(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
+  const files = walkRepoFiles(ctx.cwd, ctx.signal);
+  const violations: HoloRuleViolation[] = [];
+
+  for (const relFile of files) {
+    if (ctx.signal.aborted) return violations;
+    if (basename(relFile) !== 'abi-golden.json') continue;
+
+    const absFile = resolve(ctx.cwd, relFile);
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(readFileSync(absFile, 'utf8')) as Record<string, unknown>;
+    } catch {
+      violations.push(
+        createRuleViolation({
+          ruleId: 'B8G-ABI-SURFACE',
+          severity: 'error',
+          category: 'abi',
+          repo: ctx.repo,
+          file: relFile,
+          line: 1,
+          snippet: 'invalid JSON',
+          message: `Invalid JSON in ABI golden file "${relFile}"`,
+          autofixable: false,
+        }),
+      );
+      continue;
+    }
+
+    if (parsed.abiMagic !== B8G_ABI_MAGIC_V3) {
+      violations.push(
+        createRuleViolation({
+          ruleId: 'B8G-ABI-SURFACE',
+          severity: 'error',
+          category: 'abi',
+          repo: ctx.repo,
+          file: relFile,
+          line: 1,
+          snippet: `abiMagic=${String(parsed.abiMagic ?? '<missing>')}`,
+          message: `ABI golden "${relFile}" has invalid or missing abiMagic (expected ${B8G_ABI_MAGIC_V3})`,
+          autofixable: false,
+        }),
+      );
+    }
+
+    const header = typeof parsed.header === 'string' ? parsed.header.trim() : '';
+    const headerExists =
+      header.length > 0 &&
+      (existsSync(resolve(ctx.cwd, header)) || existsSync(resolve(dirname(absFile), header)));
+    if (!headerExists) {
+      violations.push(
+        createRuleViolation({
+          ruleId: 'B8G-ABI-SURFACE',
+          severity: 'error',
+          category: 'abi',
+          repo: ctx.repo,
+          file: relFile,
+          line: 1,
+          snippet: `header=${header || '<missing>'}`,
+          message: `ABI golden "${relFile}" references missing or unspecified header "${header || '<missing>'}"`,
+          autofixable: false,
+        }),
+      );
+    }
+  }
+
+  return violations;
+}
+
 /**
- * Registers the 8 canonical built-in `holo-ci` programmatic audits into `registry`:
+ * Registers the 13 canonical built-in `holo-ci` programmatic audits into `registry`:
  *   1. `holo-ci/wf-harden` — GitHub Actions workflow hardening check
  *   2. `holo-ci/governance` — SPDX LICENSE, CODEOWNERS, .gitattributes, badges & workflow bloat
  *   3. `holo-ci/boundary` — Chromium-style boundary/DAG/B8G016 check when `boundary.json` exists
@@ -929,6 +1448,11 @@ function scanBrokenLocalLinkViolations(ctx: ProgrammaticAuditContext): HoloRuleV
  *   6. `holo-ci/erasable-syntax` — Rejects non-erasable TypeScript syntax (`enum`, `namespace`, parameter properties)
  *   7. `holo-ci/secret-scan` — Detects high-confidence leaked token prefixes & private keys
  *   8. `holo-ci/no-broken-local-links` — Detects broken relative file links in `README.md` and `docs/*.md`
+ *   9. `holo-ci/dead-exports` — Detects broken relative barrel re-exports (`export ... from './missing.mts'`)
+ *  10. `holo-ci/binary-budget` — Enforces compiled `.b8p`/`.wasm`/`.so`/`.dll`/`.exe` size budgets under `dist/`
+ *  11. `holo-ci/test-hermeticity` — Rejects `*.test.mts` files with unisolated working-tree fixture writes
+ *  12. `holo-ci/spdx-header` — Verifies `package.json` `"license"` and root `LICENSE` SPDX consistency
+ *  13. `holo-ci/abi-surface` — Verifies `abi-golden.json` `abiMagic === '0x33564742'` & header existence
  */
 export function registerBuiltinHoloCiAudits(registry: AuditStackRegistry): AuditStackRegistry {
   registry.register({
@@ -1100,11 +1624,76 @@ export function registerBuiltinHoloCiAudits(registry: AuditStackRegistry): Audit
     },
   });
 
+  registry.register({
+    id: 'holo-ci/dead-exports',
+    title: 'Dead Barrel Re-Export & Unreachable Target Guard',
+    category: 'geometry',
+    severity: 'error',
+    rollbackHint: 'Remove dead barrel re-export or restore missing target module',
+    remediationCmd: 'holo-ci audit-stack --only holo-ci/dead-exports',
+    run(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
+      if (ctx.signal.aborted) return [];
+      return scanDeadExportsViolations(ctx);
+    },
+  });
+
+  registry.register({
+    id: 'holo-ci/binary-budget',
+    title: 'Compiled Artifact Binary Size Budget Guard',
+    category: 'abi',
+    severity: 'error',
+    rollbackHint: 'Revert binary bloat or trigger RollingReleaseManifest O(1) rollback',
+    remediationCmd: 'holo-ci audit-stack --only holo-ci/binary-budget',
+    run(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
+      if (ctx.signal.aborted) return [];
+      return scanBinaryBudgetViolations(ctx);
+    },
+  });
+
+  registry.register({
+    id: 'holo-ci/test-hermeticity',
+    title: 'Test Suite Hermeticity & Temp-Dir Isolation Guard',
+    category: 'governance',
+    severity: 'error',
+    rollbackHint: 'Isolate test writes into os.tmpdir()/mkdtempSync with rmSync cleanup',
+    remediationCmd: 'holo-ci audit-stack --only holo-ci/test-hermeticity',
+    run(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
+      if (ctx.signal.aborted) return [];
+      return scanTestHermeticityViolations(ctx);
+    },
+  });
+
+  registry.register({
+    id: 'holo-ci/spdx-header',
+    title: 'SPDX License & package.json Consistency Guard',
+    category: 'governance',
+    severity: 'error',
+    rollbackHint: 'Align package.json "license" and root LICENSE to BSD-3-Clause, MIT, or Apache-2.0',
+    remediationCmd: 'holo-ci audit-stack --only holo-ci/spdx-header',
+    run(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
+      if (ctx.signal.aborted) return [];
+      return scanSpdxHeaderViolations(ctx);
+    },
+  });
+
+  registry.register({
+    id: 'holo-ci/abi-surface',
+    title: 'ABI Golden Magic (B8G_ABI_MAGIC_V3) & Header Guard',
+    category: 'abi',
+    severity: 'error',
+    rollbackHint: 'Regenerate abi-golden.json with B8G_ABI_MAGIC_V3 (0x33564742) and valid header path',
+    remediationCmd: 'holo-ci audit-stack --only holo-ci/abi-surface',
+    run(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
+      if (ctx.signal.aborted) return [];
+      return scanAbiSurfaceViolations(ctx);
+    },
+  });
+
   return registry;
 }
 
 /**
- * Convenience runner that creates a registry with all 8 built-in `holo-ci` audits and executes it.
+ * Convenience runner that creates a registry with all 13 built-in `holo-ci` audits and executes it.
  */
 export async function runBuiltinAuditStack(
   options: AuditStackRunOptions = {},
