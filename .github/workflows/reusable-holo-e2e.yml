@@ -47,6 +47,7 @@ jobs:
   holo-e2e:
     name: Holo-E2E (Lavapipe Zero-X11)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: read
@@ -98,4 +99,5 @@ jobs:
         with:
           name: holo-e2e-artifacts
           path: ${{ inputs.artifacts-path }}
+          retention-days: 7
           if-no-files-found: warn

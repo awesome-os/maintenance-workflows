@@ -30,6 +30,7 @@ export interface ResolveE2eImageOptions {
   githubActor?: string;
   envFile?: string;
   workDir?: string;
+  retryDelayMs?: number;
   fetchFn?: typeof fetch;
   execFn?: typeof execFileSync;
 }
@@ -127,10 +128,40 @@ export function verifySha512SumsContent(
   return false;
 }
 
+export async function fetchWithRetry(
+  fetchFn: typeof fetch,
+  url: string,
+  maxAttempts = 3,
+  baseDelayMs = 250,
+): Promise<Response> {
+  const attempts = Math.max(1, Math.floor(maxAttempts));
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const res = await fetchFn(url);
+      const isTransient = res.status === 429 || (res.status >= 500 && res.status < 600);
+      if (!isTransient || attempt === attempts) {
+        return res;
+      }
+    } catch (err) {
+      lastError = err;
+      if (attempt === attempts) {
+        throw err;
+      }
+    }
+    const delayMs = Math.min(baseDelayMs * 2 ** (attempt - 1), 2000);
+    if (delayMs > 0) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(`Failed to fetch ${url}`);
+}
+
 export async function resolveE2eImage(options: ResolveE2eImageOptions = {}): Promise<ResolveE2eImageResult> {
   const spec = resolveImageSpec(options.runnerImage, options.runnerTier ?? 'gpu');
   const execFn = options.execFn ?? execFileSync;
   const fetchFn = options.fetchFn ?? fetch;
+  const retryDelayMs = options.retryDelayMs ?? 250;
   const actor = options.githubActor || 'github-actions';
   const token = options.githubToken || '';
 
@@ -167,8 +198,8 @@ export async function resolveE2eImage(options: ResolveE2eImageOptions = {}): Pro
 
     const baseUrl = 'https://github.com/awesome-os/dockerimages/releases/download/v11-oci-latest';
     const [tarRes, sumsRes] = await Promise.all([
-      fetchFn(`${baseUrl}/${spec.fallbackTarball}`),
-      fetchFn(`${baseUrl}/${spec.fallbackSums}`),
+      fetchWithRetry(fetchFn, `${baseUrl}/${spec.fallbackTarball}`, 3, retryDelayMs),
+      fetchWithRetry(fetchFn, `${baseUrl}/${spec.fallbackSums}`, 3, retryDelayMs),
     ]);
     if (!tarRes.ok) {
       throw new Error(`Failed to download ${spec.fallbackTarball}: HTTP ${tarRes.status}`);

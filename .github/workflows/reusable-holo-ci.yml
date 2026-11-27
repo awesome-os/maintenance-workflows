@@ -45,6 +45,7 @@ jobs:
   holo-ci:
     name: Holo-CI (${{ inputs.phase }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     outputs:
       bumped: ${{ steps.run-holo-ci.outputs.bumped }}
     steps:
@@ -120,4 +121,5 @@ jobs:
         with:
           name: holo-ci-receipt-${{ inputs.phase }}
           path: holo-ci-receipt.ndjson
+          retention-days: 7
           if-no-files-found: warn

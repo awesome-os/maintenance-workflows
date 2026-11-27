@@ -342,6 +342,140 @@ describe('holo-ci verify & guards', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('enforces requireWorkflowHardening guard: passes hardened workflows & catches missing concurrency/timeout/retention or legacy actions', () => {
+    const dir = makeTempDir('holo-ci-workflow-hardening-');
+    try {
+      mkdirSync(join(dir, '.github', 'workflows'), { recursive: true });
+      writeFileSync(join(dir, 'README.md'), '# Hardening Test\n', 'utf8');
+
+      // 1. Passing hardened workflows (standard, caller-only, reusable with inline and block upload-artifact)
+      writeFileSync(
+        join(dir, '.github', 'workflows', 'ci.yml'),
+        [
+          'name: Hardened CI',
+          'on: [push]',
+          'concurrency:',
+          '  group: ${{ github.workflow }}-${{ github.ref }}',
+          '  cancel-in-progress: true',
+          'jobs:',
+          '  test:',
+          '    runs-on: ubuntu-latest',
+          '    timeout-minutes: 20',
+          '    steps:',
+          '      - uses: actions/checkout@v7',
+          '      - uses: actions/setup-node@v7',
+          '      - uses: mlugg/setup-zig@v2',
+          '      - uses: actions/upload-artifact@v7',
+          '        with:',
+          '          name: receipt',
+          '          path: receipt.json',
+          '          retention-days: 7',
+          '      - uses: actions/upload-pages-artifact@v5',
+          '        with: { path: docs }',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+
+      writeFileSync(
+        join(dir, '.github', 'workflows', 'caller.yml'),
+        [
+          'name: Caller Workflow',
+          'on:',
+          '  push:',
+          '    branches: [main]',
+          'concurrency:',
+          '  group: ${{ github.workflow }}-${{ github.ref }}',
+          '  cancel-in-progress: true',
+          'jobs:',
+          '  verify:',
+          '    uses: awesome-os/maintenance-workflows/.github/workflows/reusable-holo-ci.yml@v1',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+
+      writeFileSync(
+        join(dir, '.github', 'workflows', 'reusable.yml'),
+        [
+          'name: Reusable Workflow',
+          'on:',
+          '  workflow_call:',
+          'jobs:',
+          '  build:',
+          '    runs-on: ubuntu-latest',
+          '    timeout-minutes: 30',
+          '    steps:',
+          '      - uses: actions/download-artifact@v8',
+          '      - uses: actions/cache@v6',
+          '      - uses: actions/upload-artifact@v7',
+          "        with: { name: 'out', path: 'dist/*', retention-days: 7 }",
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const manifest: HoloCiManifest = {
+        schema: HOLO_CI_SCHEMA,
+        name: 'hardening-test',
+        kind: 'control-plane',
+        docs: ['README.md'],
+        guards: { noWorkflowBloat: true, requireWorkflowHardening: true },
+      };
+
+      const passRes = runVerify(manifest, { cwd: dir, skipTests: true, skipGates: true });
+      assert.equal(passRes.ok, true, JSON.stringify(passRes.guardViolations));
+      assert.equal(passRes.guardViolations.length, 0);
+
+      // 2. Failing workflow hitting all 4 hardening violations
+      writeFileSync(
+        join(dir, '.github', 'workflows', 'unhardened.yml'),
+        [
+          'name: Unhardened',
+          'on: [push]',
+          'jobs:',
+          '  build:',
+          '    runs-on: ubuntu-latest',
+          '    steps:',
+          '      - uses: actions/checkout@v4',
+          '      - uses: actions/setup-node@v4',
+          '      - uses: goto-bus-stop/setup-zig@v2',
+          '      - uses: actions/cache/restore@v4',
+          '      - uses: actions/download-artifact@v4',
+          '      - uses: actions/upload-artifact@v4',
+          '        with:',
+          '          name: bad-artifact',
+          '          path: out.bin',
+          '      - uses: actions/upload-artifact@v7',
+          '        with: { name: missing-retention, path: out2.bin }',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const failRes = runVerify(manifest, { cwd: dir, skipTests: true, skipGates: true });
+      assert.equal(failRes.ok, false);
+      const hardeningViolations = failRes.guardViolations.filter(
+        (v) => v.guard === 'requireWorkflowHardening' && v.file === '.github/workflows/unhardened.yml',
+      );
+      const snippets = hardeningViolations.map((v) => v.snippet).join('\n');
+      assert.match(snippets, /missing top-level concurrency/);
+      assert.match(snippets, /runs-on without timeout-minutes/);
+      assert.match(snippets, /actions\/checkout@v4/);
+      assert.match(snippets, /actions\/setup-node@v4/);
+      assert.match(snippets, /goto-bus-stop\/setup-zig@v2/);
+      assert.match(snippets, /actions\/cache\/restore@v4/);
+      assert.match(snippets, /actions\/download-artifact@v4/);
+      assert.match(snippets, /actions\/upload-artifact@v4/);
+      assert.equal(
+        hardeningViolations.filter((v) => v.snippet.includes('missing retention-days')).length,
+        2,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('holo-ci sync', () => {

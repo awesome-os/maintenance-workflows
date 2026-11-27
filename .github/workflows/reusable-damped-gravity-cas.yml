@@ -23,6 +23,7 @@ jobs:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, os_tag: linux-x64, ext: so }
           - { os: macos-latest, target: aarch64-apple-darwin, os_tag: macos-arm64, ext: dylib }
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/checkout@v7
@@ -49,7 +50,7 @@ jobs:
           GRAVITY_CACHE_HIT: ${{ steps.rust_cache.outputs.cache-hit || 'false' }}
         run: node .holo-ci-runtime/holo-ci/gravity-bump-helper.mts build fast-lib
       - uses: actions/upload-artifact@v7
-        with: { name: 'lib-${{ inputs.asset_prefix }}-${{ matrix.os_tag }}', path: 'dist/*' }
+        with: { name: 'lib-${{ inputs.asset_prefix }}-${{ matrix.os_tag }}', path: 'dist/*', retention-days: 7 }
 
   incremental-bin:
     if: inputs.crate_bin != ''
@@ -61,6 +62,7 @@ jobs:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, os_tag: linux-x64, ext: '' }
           - { os: macos-latest, target: aarch64-apple-darwin, os_tag: macos-arm64, ext: '' }
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/checkout@v7
@@ -87,12 +89,13 @@ jobs:
           GRAVITY_CACHE_HIT: ${{ steps.rust_cache.outputs.cache-hit || 'false' }}
         run: node .holo-ci-runtime/holo-ci/gravity-bump-helper.mts build incremental-bin
       - uses: actions/upload-artifact@v7
-        with: { name: 'bin-${{ inputs.asset_prefix }}-${{ matrix.os_tag }}', path: 'dist/*' }
+        with: { name: 'bin-${{ inputs.asset_prefix }}-${{ matrix.os_tag }}', path: 'dist/*', retention-days: 7 }
 
   publish:
     if: inputs.publish_release && startsWith(github.ref, 'refs/tags/v')
     needs: [fast-lib, incremental-bin]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with: { repository: awesome-os/maintenance-workflows, ref: v1, path: .holo-ci-runtime }

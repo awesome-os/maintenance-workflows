@@ -8,6 +8,7 @@ import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   buildDockerRunArgs,
+  fetchWithRetry,
   formatE2eSummaryMarkdown,
   parseDockerLoadedImage,
   resolveE2eImage,
@@ -96,6 +97,70 @@ describe('holo-ci/e2e-runner.mts', () => {
       const envText = readFileSync(envFile, 'utf8');
       assert.match(envText, /RUNNER_IMAGE=ghcr\.io\/awesome-os\/holo-e2e-lite:v11/);
       assert.match(envText, /RUNNER_TIER=lite/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fetchWithRetry retries transient 502/503 HTTP responses with bounded backoff and does not retry 404', async () => {
+    const dir = makeTempDir('holo-e2e-retry-');
+    try {
+      let transientCalls = 0;
+      const flakyFetch = (async () => {
+        transientCalls += 1;
+        if (transientCalls === 1) return new Response('bad gateway', { status: 502 });
+        if (transientCalls === 2) return new Response('unavailable', { status: 503 });
+        return new Response('recovered', { status: 200 });
+      }) as typeof fetch;
+
+      const recovered = await fetchWithRetry(flakyFetch, 'https://example.test/asset.tar.gz', 3, 1);
+      assert.equal(recovered.status, 200);
+      assert.equal(await recovered.text(), 'recovered');
+      assert.equal(transientCalls, 3);
+
+      let notFoundCalls = 0;
+      const notFoundFetch = (async () => {
+        notFoundCalls += 1;
+        return new Response('missing', { status: 404 });
+      }) as typeof fetch;
+      const miss = await fetchWithRetry(notFoundFetch, 'https://example.test/missing', 3, 1);
+      assert.equal(miss.status, 404);
+      assert.equal(notFoundCalls, 1);
+
+      // End-to-end recovery inside resolveE2eImage on 502/503 release tarball + sums downloads
+      const tarBytes = Buffer.from('retry-oci-tarball', 'utf8');
+      const tarHash = createHash('sha512').update(tarBytes).digest('hex');
+      const attemptByUrl = new Map<string, number>();
+      const flakyReleaseFetch = (async (input: string | URL | Request) => {
+        const url = String(input);
+        const count = (attemptByUrl.get(url) ?? 0) + 1;
+        attemptByUrl.set(url, count);
+        if (url.endsWith('.tar.gz')) {
+          if (count === 1) return new Response('bad gateway', { status: 502 });
+          return new Response(tarBytes, { status: 200 });
+        }
+        if (url.endsWith('.txt')) {
+          if (count <= 2) return new Response('service unavailable', { status: 503 });
+          return new Response(`${tarHash}  holo-e2e-lite-linux-amd64.oci.tar.gz\n`, { status: 200 });
+        }
+        return new Response('', { status: 404 });
+      }) as typeof fetch;
+
+      const mockExec = ((_cmd: string, args: string[]) => {
+        if (args[0] === 'load') return 'Loaded image: ghcr.io/awesome-os/holo-e2e-lite:retry\n';
+        return '';
+      }) as unknown as typeof execFileSync;
+
+      const res = await resolveE2eImage({
+        runnerTier: 'lite',
+        workDir: join(dir, 'oci'),
+        retryDelayMs: 1,
+        fetchFn: flakyReleaseFetch,
+        execFn: mockExec,
+      });
+      assert.equal(res.resolvedImage, 'ghcr.io/awesome-os/holo-e2e-lite:retry');
+      assert.equal(attemptByUrl.get('https://github.com/awesome-os/dockerimages/releases/download/v11-oci-latest/holo-e2e-lite-linux-amd64.oci.tar.gz'), 2);
+      assert.equal(attemptByUrl.get('https://github.com/awesome-os/dockerimages/releases/download/v11-oci-latest/SHA512SUMS-holo-e2e-lite.txt'), 3);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

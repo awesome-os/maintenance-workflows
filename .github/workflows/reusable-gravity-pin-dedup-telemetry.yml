@@ -26,6 +26,7 @@ jobs:
   gravity-pin-dedup-telemetry:
     name: Gravity Pinning, SHA-512 Dedup & Runner Telemetry (Bounce ${{ inputs.bounce_index || '0' }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -64,6 +65,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: gravity-telemetry-bounce-${{ inputs.bounce_index || '0' }}
+          retention-days: 7
           path: |
             gravity-telemetry.json
             gravity-telemetry.ndjson

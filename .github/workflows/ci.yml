@@ -7,6 +7,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -14,6 +18,7 @@ jobs:
   holo-ci-self-test:
     name: Holo-CI Test & Self-Verify
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -35,3 +40,4 @@ jobs:
         with:
           name: holo-ci-receipt
           path: holo-ci-receipt.ndjson
+          retention-days: 7

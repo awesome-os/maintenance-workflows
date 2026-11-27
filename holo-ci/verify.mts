@@ -23,6 +23,10 @@ const RUN_KEY_REGEX = /^(\s*(?:-\s+)?)run\s*:\s*(.*)$/;
 const EVAL_CMD_SUB_REGEX = /\beval\s+(?:["'][^"']*)?\$\(/;
 const UNTRUSTED_GH_CONTEXT_REGEX =
   /\$\{\{[^}]*\bgithub\.(?:head_ref|event\.(?:issue|pull_request\.(?:title|body|head\.ref|head\.label)|comment|review|review_comment|discussion)\b)[^}]*\}\}/;
+const DEPRECATED_ZIG_ACTION_REGEX = /\bgoto-bus-stop\/setup-zig@/i;
+const LEGACY_CORE_ACTION_REGEX =
+  /\bactions\/(?:checkout|setup-node|upload-artifact|download-artifact|cache(?:\/restore|\/save)?)@v[1-4](?![0-9])/i;
+const UPLOAD_ARTIFACT_USES_REGEX = /\buses\s*:\s*['"]?actions\/upload-artifact(?:@[^\s'"#]+)?/i;
 
 export function runShellCommand(
   command: string,
@@ -88,7 +92,7 @@ function isAllowlistedGuardLine(lineText: string, relPath: string): boolean {
   // Exclude guard configuration keys in JSON manifests
   if (relPath.endsWith('holo-ci.json') || relPath.endsWith('package.json')) {
     if (
-      /^\s*"(zeroGhost|zeroCasV1|zeroHttpIpc|spdxLicense|gitattributes|codeowners|noBrokenBadges|noWorkflowBloat|maxWorkflowLines)"\s*:/.test(
+      /^\s*"(zeroGhost|zeroCasV1|zeroHttpIpc|spdxLicense|gitattributes|codeowners|noBrokenBadges|noWorkflowBloat|maxWorkflowLines|requireWorkflowHardening)"\s*:/.test(
         lineText,
       )
     ) {
@@ -330,6 +334,211 @@ export function scanGuardViolations(
           } else {
             checkRunLine(rest, i + 1);
           }
+        }
+      }
+    }
+  }
+
+  if (guards.requireWorkflowHardening) {
+    const workflowFiles = files.filter((f) =>
+      relative(cwd, f).replace(/\\/g, '/').startsWith('.github/workflows/'),
+    );
+    for (const wfPath of workflowFiles) {
+      const relPath = relative(cwd, wfPath).replace(/\\/g, '/');
+      const content = readFileSync(wfPath, 'utf8');
+      const lines = content.length === 0 ? [] : content.replace(/\r?\n$/, '').split(/\r?\n/);
+
+      let hasTopConcurrency = false;
+      let hasWorkflowCall = false;
+      let inOnBlock = false;
+      let inJobsBlock = false;
+      let jobKeyIndent = -1;
+      let currentJob: {
+        name: string;
+        propIndent: number;
+        hasRunsOn: boolean;
+        runsOnLine: number;
+        hasTimeout: boolean;
+        stepsKeyIndent: number;
+        stepListIndent: number;
+      } | null = null;
+      const jobs: Array<NonNullable<typeof currentJob>> = [];
+
+      let activeStep: { uploadLine: number | null; hasRetention: boolean } | null = null;
+      let inRunBlock = false;
+      let runKeyIndent = -1;
+      let runBlockIndent = -1;
+
+      const flushUploadStep = (): void => {
+        if (activeStep && activeStep.uploadLine !== null && !activeStep.hasRetention) {
+          violations.push({
+            guard: 'requireWorkflowHardening',
+            file: relPath,
+            line: activeStep.uploadLine,
+            snippet: 'actions/upload-artifact step missing retention-days',
+          });
+        }
+        activeStep = null;
+      };
+
+      const flushJob = (): void => {
+        flushUploadStep();
+        if (currentJob) {
+          jobs.push(currentJob);
+          currentJob = null;
+        }
+      };
+
+      for (let i = 0; i < lines.length; i++) {
+        const lineText = lines[i];
+        const trimmed = lineText.trim();
+        if (trimmed.length === 0 || trimmed.startsWith('#')) continue;
+
+        const indent = lineText.length - lineText.trimStart().length;
+
+        if (inRunBlock) {
+          if (indent <= runKeyIndent || (runBlockIndent !== -1 && indent < runBlockIndent)) {
+            inRunBlock = false;
+            runKeyIndent = -1;
+            runBlockIndent = -1;
+          } else {
+            if (!isAllowlistedGuardLine(lineText, relPath)) {
+              if (DEPRECATED_ZIG_ACTION_REGEX.test(lineText) || LEGACY_CORE_ACTION_REGEX.test(lineText)) {
+                violations.push({
+                  guard: 'requireWorkflowHardening',
+                  file: relPath,
+                  line: i + 1,
+                  snippet: lineText.trim().slice(0, 160),
+                });
+              }
+            }
+            continue;
+          }
+        }
+
+        if (!isAllowlistedGuardLine(lineText, relPath)) {
+          if (DEPRECATED_ZIG_ACTION_REGEX.test(lineText) || LEGACY_CORE_ACTION_REGEX.test(lineText)) {
+            violations.push({
+              guard: 'requireWorkflowHardening',
+              file: relPath,
+              line: i + 1,
+              snippet: lineText.trim().slice(0, 160),
+            });
+          }
+        }
+
+        if (indent === 0) {
+          flushJob();
+          inOnBlock = false;
+          inJobsBlock = false;
+          jobKeyIndent = -1;
+
+          if (/^concurrency\s*:/.test(trimmed)) {
+            hasTopConcurrency = true;
+          } else if (/^on\s*:/.test(trimmed)) {
+            const afterOn = trimmed.replace(/^on\s*:\s*/, '').replace(/\s+#.*$/, '').trim();
+            if (afterOn.length === 0) {
+              inOnBlock = true;
+            } else if (/\bworkflow_call\b/.test(afterOn)) {
+              hasWorkflowCall = true;
+            }
+          } else if (/^jobs\s*:/.test(trimmed)) {
+            inJobsBlock = true;
+          }
+        } else if (inOnBlock) {
+          if (/^workflow_call\s*:/.test(trimmed)) {
+            hasWorkflowCall = true;
+          }
+        } else if (inJobsBlock) {
+          if (jobKeyIndent === -1) jobKeyIndent = indent;
+
+          if (indent === jobKeyIndent && /^[A-Za-z0-9_.-]+\s*:/.test(trimmed)) {
+            flushJob();
+            currentJob = {
+              name: trimmed.split(':')[0].trim(),
+              propIndent: -1,
+              hasRunsOn: false,
+              runsOnLine: i + 1,
+              hasTimeout: false,
+              stepsKeyIndent: -1,
+              stepListIndent: -1,
+            };
+            continue;
+          }
+
+          if (currentJob) {
+            if (currentJob.propIndent === -1 && indent > jobKeyIndent) {
+              currentJob.propIndent = indent;
+            }
+            if (currentJob.stepsKeyIndent !== -1 && indent <= currentJob.stepsKeyIndent && !trimmed.startsWith('-')) {
+              flushUploadStep();
+              currentJob.stepsKeyIndent = -1;
+              currentJob.stepListIndent = -1;
+            }
+            if (indent === currentJob.propIndent && currentJob.stepsKeyIndent === -1) {
+              if (/^runs-on\s*:/.test(trimmed)) {
+                currentJob.hasRunsOn = true;
+                currentJob.runsOnLine = i + 1;
+              } else if (/^timeout-minutes\s*:/.test(trimmed)) {
+                currentJob.hasTimeout = true;
+              } else if (/^steps\s*:/.test(trimmed)) {
+                currentJob.stepsKeyIndent = indent;
+              }
+            } else if (currentJob.stepsKeyIndent !== -1) {
+              if (currentJob.stepListIndent === -1 && trimmed.startsWith('-')) {
+                currentJob.stepListIndent = indent;
+              }
+              if (currentJob.stepListIndent !== -1) {
+                if (indent < currentJob.stepListIndent) {
+                  flushUploadStep();
+                } else if (indent === currentJob.stepListIndent && /^-\s+/.test(trimmed)) {
+                  flushUploadStep();
+                  activeStep = { uploadLine: null, hasRetention: false };
+                }
+                if (activeStep && !isAllowlistedGuardLine(lineText, relPath)) {
+                  const stepBody = trimmed.replace(/^-\s+/, '');
+                  if (UPLOAD_ARTIFACT_USES_REGEX.test(stepBody)) {
+                    activeStep.uploadLine = i + 1;
+                  }
+                  if (/\bretention-days\s*:/.test(stepBody)) {
+                    activeStep.hasRetention = true;
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        const runMatch = RUN_KEY_REGEX.exec(lineText);
+        if (runMatch) {
+          const rest = runMatch[2].trim();
+          if (/^[|>][+-]?(?:\s+#.*)?$/.test(rest)) {
+            inRunBlock = true;
+            runKeyIndent = indent;
+            runBlockIndent = -1;
+          }
+        }
+      }
+
+      flushJob();
+
+      if (!hasWorkflowCall && !hasTopConcurrency) {
+        violations.push({
+          guard: 'requireWorkflowHardening',
+          file: relPath,
+          line: 1,
+          snippet: 'Non-reusable workflow missing top-level concurrency:',
+        });
+      }
+
+      for (const job of jobs) {
+        if (job.hasRunsOn && !job.hasTimeout) {
+          violations.push({
+            guard: 'requireWorkflowHardening',
+            file: relPath,
+            line: job.runsOnLine,
+            snippet: `Job "${job.name}" declares runs-on without timeout-minutes`,
+          });
         }
       }
     }
