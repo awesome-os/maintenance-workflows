@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { AuditStackRunResult } from './audit-stack.mts';
-import type { HardenWorkflowsDirResult } from './wf-harden.mts';
+import type { FleetForensicsReport } from './fleet-forensics.mts';
+import type { FleetWorkflowHardeningResult, HardenWorkflowsDirResult } from './wf-harden.mts';
 
 export const HOLO_CI_SCHEMA = 'holo-ci.v1' as const;
 export const HOLO_CI_RECEIPT_SCHEMA = 'holo-ci.receipt.v1' as const;
@@ -62,7 +63,8 @@ export type HoloCiPhase =
   | 'lock-compat'
   | 'boundary-audit'
   | 'wf-harden'
-  | 'audit-stack';
+  | 'audit-stack'
+  | 'fleet-forensics';
 
 export interface HoloCiGuards {
   zeroGhost?: boolean;
@@ -406,7 +408,9 @@ export interface HoloCiReceipt {
   lockCompat?: HoloCiLockCompatResult;
   boundaryAudit?: HoloCiBoundaryResult;
   wfHarden?: HardenWorkflowsDirResult;
+  wfHardenFleet?: FleetWorkflowHardeningResult;
   auditStack?: AuditStackRunResult;
+  fleetForensics?: FleetForensicsReport;
   errors?: string[];
 }
 

@@ -14,7 +14,7 @@ on:
         default: '26'
         type: string
       phase:
-        description: 'Holo-CI phase to execute (verify|sync|bump|pack|telemetry|maintain)'
+        description: 'Holo-CI phase to execute (verify|sync|bump|pack|telemetry|maintain|lock-compat|boundary-audit|wf-harden|audit-stack|fleet-forensics)'
         required: false
         default: 'verify'
         type: string

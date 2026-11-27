@@ -3,7 +3,7 @@
   "name": "maintenance-workflows",
   "kind": "control-plane",
   "tests": [
-    "node --test holo-ci/holo-ci.test.mts holo-ci/workflow-scripts.test.mts holo-ci/wf-harden.test.mts holo-ci/gh-client.test.mts holo-ci/audit-stack.test.mts"
+    "node --test holo-ci/holo-ci.test.mts holo-ci/workflow-scripts.test.mts holo-ci/wf-harden.test.mts holo-ci/gh-client.test.mts holo-ci/audit-stack.test.mts holo-ci/fleet-forensics.test.mts"
   ],
   "docs": [
     "README.md"

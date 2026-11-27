@@ -21,6 +21,9 @@ export interface BuildReceiptInput {
   lockCompat?: HoloCiReceipt['lockCompat'];
   boundaryAudit?: HoloCiReceipt['boundaryAudit'];
   wfHarden?: HoloCiReceipt['wfHarden'];
+  wfHardenFleet?: HoloCiReceipt['wfHardenFleet'];
+  auditStack?: HoloCiReceipt['auditStack'];
+  fleetForensics?: HoloCiReceipt['fleetForensics'];
   errors?: string[];
 }
 
@@ -42,8 +45,37 @@ export function buildReceipt(input: BuildReceiptInput): HoloCiReceipt {
     ...(input.lockCompat ? { lockCompat: input.lockCompat } : {}),
     ...(input.boundaryAudit ? { boundaryAudit: input.boundaryAudit } : {}),
     ...(input.wfHarden ? { wfHarden: input.wfHarden } : {}),
+    ...(input.wfHardenFleet ? { wfHardenFleet: input.wfHardenFleet } : {}),
+    ...(input.auditStack ? { auditStack: input.auditStack } : {}),
+    ...(input.fleetForensics ? { fleetForensics: input.fleetForensics } : {}),
     ...(input.errors && input.errors.length > 0 ? { errors: input.errors } : {}),
   };
+}
+
+interface SummaryViolationRow {
+  readonly rule: string;
+  readonly location: string;
+  readonly detail: string;
+}
+
+function escapeMdCell(value: string): string {
+  return value.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|').trim().slice(0, 220);
+}
+
+function appendViolationTable(lines: string[], heading: string, rows: readonly SummaryViolationRow[]): void {
+  if (rows.length === 0) return;
+  lines.push(
+    '',
+    `### ${heading} (${rows.length})`,
+    '',
+    '| Rule / Guard | File:Line | Snippet / Message |',
+    '| :--- | :--- | :--- |',
+  );
+  for (const row of rows) {
+    lines.push(
+      `| \`${escapeMdCell(row.rule)}\` | \`${escapeMdCell(row.location)}\` | ${escapeMdCell(row.detail)} |`,
+    );
+  }
 }
 
 export function formatStepSummaryMarkdown(receipt: HoloCiReceipt): string {
@@ -125,18 +157,122 @@ export function formatStepSummaryMarkdown(receipt: HoloCiReceipt): string {
     );
   }
 
-  if (receipt.verify && receipt.verify.guardViolations.length > 0) {
-    lines.push('', '### Guard Violations', '');
+  if (receipt.wfHardenFleet) {
+    const fleet = receipt.wfHardenFleet;
+    lines.push(
+      `| Fleet Workflow Hardening | mode=\`${fleet.mode}\` · ${fleet.passedRepos}/${fleet.reposScanned} repos clean · ${fleet.workflowsScanned} workflows · findings=${fleet.totalFindings} · fixed=${fleet.totalFixesApplied} · remaining=${fleet.remainingFindings} |`,
+    );
+  }
+
+  if (receipt.auditStack) {
+    const as = receipt.auditStack;
+    lines.push(
+      `| Audit Stack | mode=\`${as.mode}\` · ${as.passedAudits}/${as.totalAudits} audits passed · failed=${as.failedAudits} · aborted=${as.abortedAudits} · violations=${as.violationCount} |`,
+    );
+  }
+
+  if (receipt.fleetForensics) {
+    const ff = receipt.fleetForensics;
+    lines.push(
+      `| Fleet Forensics | owner=\`${ff.owner}\` (${ff.hours}h) · ${ff.greenOnLatest}/${ff.reposScanned} green · failed=${ff.failedRuns.length} · cancelled=${ff.cancelledRuns.length} · slow=${ff.slowJobs.length} |`,
+    );
+  }
+
+  if (receipt.verify) {
+    const verifyRows: SummaryViolationRow[] = [];
     for (const v of receipt.verify.guardViolations) {
-      lines.push(`- \`${v.guard}\` at \`${v.file}:${v.line}\`: \`${v.snippet}\``);
+      verifyRows.push({
+        rule: v.guard,
+        location: `${v.file}:${v.line}`,
+        detail: v.snippet,
+      });
     }
+    for (const doc of receipt.verify.docs) {
+      if (!doc.exists) {
+        verifyRows.push({
+          rule: 'verify.doc-missing',
+          location: `${doc.path}:1`,
+          detail: `Required documentation file missing: ${doc.path}`,
+        });
+      }
+    }
+    for (const cmd of [...receipt.verify.tests, ...receipt.verify.nativeGates]) {
+      if (!cmd.ok) {
+        const excerpt = (cmd.stderr || cmd.stdout || `exit code ${cmd.exitCode}`).trim();
+        verifyRows.push({
+          rule: `verify.${cmd.kind}`,
+          location: `${cmd.command}:0`,
+          detail: `exit=${cmd.exitCode}: ${excerpt}`,
+        });
+      }
+    }
+    appendViolationTable(lines, 'Guard Violations', verifyRows);
   }
 
   if (receipt.boundaryAudit && receipt.boundaryAudit.violations.length > 0) {
-    lines.push('', '### Boundary Violations', '');
-    for (const v of receipt.boundaryAudit.violations) {
-      lines.push(`- \`${v.rule}\` at \`${v.file}:${v.line}\`: ${v.message} (\`${v.snippet}\`)`);
+    appendViolationTable(
+      lines,
+      'Boundary Violations',
+      receipt.boundaryAudit.violations.map((v) => ({
+        rule: v.rule,
+        location: `${v.file}:${v.line}`,
+        detail: v.snippet ? `${v.message} (\`${v.snippet}\`)` : v.message,
+      })),
+    );
+  }
+
+  if (receipt.wfHarden && receipt.wfHarden.remainingFindings > 0) {
+    const wfRows: SummaryViolationRow[] = [];
+    for (const file of receipt.wfHarden.files) {
+      for (const f of file.remainingFindings) {
+        wfRows.push({
+          rule: f.ruleId ?? f.rule,
+          location: `${f.file}:${f.line}`,
+          detail: f.message || f.snippet,
+        });
+      }
     }
+    appendViolationTable(lines, 'Workflow Hardening Violations', wfRows);
+  }
+
+  if (receipt.wfHardenFleet && receipt.wfHardenFleet.remainingFindings > 0) {
+    const fleetRows: SummaryViolationRow[] = [];
+    for (const repoEntry of receipt.wfHardenFleet.repos) {
+      for (const file of repoEntry.result.files) {
+        for (const f of file.remainingFindings) {
+          fleetRows.push({
+            rule: f.ruleId ?? f.rule,
+            location: `${repoEntry.repo}/${f.file}:${f.line}`,
+            detail: f.message || f.snippet,
+          });
+        }
+      }
+    }
+    appendViolationTable(lines, 'Fleet Workflow Hardening Violations', fleetRows);
+  }
+
+  if (receipt.auditStack && receipt.auditStack.violations.length > 0) {
+    appendViolationTable(
+      lines,
+      'Audit Stack Violations',
+      receipt.auditStack.violations.map((v) => ({
+        rule: v.ruleId,
+        location: `${v.file}:${v.line}`,
+        detail: v.snippet && v.snippet !== v.message ? `${v.message} (\`${v.snippet}\`)` : v.message,
+      })),
+    );
+  }
+
+  if (receipt.fleetForensics && receipt.fleetForensics.failedRuns.length > 0) {
+    appendViolationTable(
+      lines,
+      'Fleet Forensics Failed Runs',
+      receipt.fleetForensics.failedRuns.map((run) => ({
+        rule: `fleet.${run.conclusion}`,
+        location: `${run.repo}:${run.runId}`,
+        detail: `${run.workflowName} (${run.headBranch}, ${run.durationSec}s)${run.failedSteps.length > 0 ? ` — ${run.failedSteps.join('; ')}` : ''}`,
+      })),
+    );
   }
 
   if (receipt.errors && receipt.errors.length > 0) {

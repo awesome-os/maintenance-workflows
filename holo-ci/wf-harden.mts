@@ -29,6 +29,7 @@ import { basename, extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const WF_HARDEN_SCHEMA = 'holo-ci.wf-harden.v1' as const;
+export const WF_HARDEN_FLEET_SCHEMA = 'holo-ci.wf-harden-fleet.v1' as const;
 export const B8G_ABI_MAGIC_V3 = '0x33564742' as const;
 export const DEFAULT_TIMEOUT_MINUTES = 30;
 export const DEFAULT_RETENTION_DAYS = 7;
@@ -54,17 +55,20 @@ export type WorkflowHardenRule =
   | 'missing-concurrency'
   | 'concurrency-cancel-race'
   | 'missing-timeout-minutes'
-  | 'missing-artifact-retention';
+  | 'missing-artifact-retention'
+  | 'duplicate-pages-workflow';
 
 export type WorkflowHardenSeverity = 'error' | 'warning';
 
 export interface WorkflowHardenFinding {
   readonly rule: WorkflowHardenRule;
+  readonly ruleId?: string;
   readonly severity: WorkflowHardenSeverity;
   readonly file: string;
   readonly line: number;
   readonly message: string;
   readonly snippet: string;
+  readonly remediation?: string;
 }
 
 export interface WorkflowHardenFix {
@@ -161,6 +165,7 @@ const CORE_ACTION_UPGRADE_RULES: readonly CoreActionUpgradeRule[] = [
 ];
 
 const UPLOAD_ARTIFACT_USES_REGEX = /\buses\s*:\s*['"]?actions\/upload-artifact(?:@[^\s'"#,}]+)?/i;
+const DEPLOY_PAGES_USES_REGEX = /\buses\s*:\s*['"]?actions\/deploy-pages(?:@[^\s'"#,}]+)?/i;
 const SENSITIVE_WORKFLOW_REGEX = /(?:deploy|publish|release|bump|autoroll)/i;
 const RUN_KEY_REGEX = /^(\s*(?:-\s+)?)run\s*:\s*(.*)$/;
 const EVAL_CMD_SUB_REGEX = /\beval\s+(?:["'][^"']*)?\$\(/;
@@ -990,6 +995,13 @@ export function hardenWorkflowsInDir(
   let remainingFindings = 0;
   let totalFixesApplied = 0;
 
+  const deployPagesHits: Array<{
+    readonly fileIndex: number;
+    readonly fileName: string;
+    readonly line: number;
+    readonly snippet: string;
+  }> = [];
+
   for (const wfPath of workflowPaths) {
     const relPath = relative(resolvedRepoDir, wfPath).replace(/\\/g, '/');
     const original = readFileSync(wfPath, 'utf8');
@@ -1000,10 +1012,61 @@ export function hardenWorkflowsInDir(
       modifiedFiles.push(relPath);
     }
 
+    const contentLines = res.content.length === 0 ? [] : res.content.replace(/\r?\n$/, '').split(/\r?\n/);
+    for (let i = 0; i < contentLines.length; i++) {
+      const lineText = contentLines[i]!;
+      const trimmed = lineText.trim();
+      if (trimmed.length === 0 || trimmed.startsWith('#') || isAllowlistedLine(lineText)) continue;
+      const { code } = splitYamlCodeAndComment(lineText);
+      if (DEPLOY_PAGES_USES_REGEX.test(code)) {
+        deployPagesHits.push({
+          fileIndex: files.length,
+          fileName: relPath,
+          line: i + 1,
+          snippet: trimmed.slice(0, 160),
+        });
+        break;
+      }
+    }
+
     totalFindings += res.findings.length;
     remainingFindings += res.remainingFindings.length;
     totalFixesApplied += res.fixesApplied.length;
     files.push(res);
+  }
+
+  if (deployPagesHits.length > 1) {
+    const canonicalHitIdx = deployPagesHits.findIndex((hit) => {
+      const base = basename(hit.fileName).toLowerCase();
+      return base === 'deploy-pages.yml' || base === 'deploy-pages.yaml';
+    });
+    const keepIdx = canonicalHitIdx !== -1 ? canonicalHitIdx : 0;
+    const allFilesList = deployPagesHits.map((h) => h.fileName).join(', ');
+    const remediation = 'Prune redundant pages.yml and keep canonical deploy-pages.yml';
+
+    for (let hIdx = 0; hIdx < deployPagesHits.length; hIdx++) {
+      if (hIdx === keepIdx) continue;
+      const hit = deployPagesHits[hIdx]!;
+      const dupFinding: WorkflowHardenFinding = {
+        rule: 'duplicate-pages-workflow',
+        ruleId: 'duplicate-pages-workflow',
+        severity: 'error',
+        file: hit.fileName,
+        line: hit.line,
+        message: `${hit.fileName}:${hit.line} duplicates actions/deploy-pages (${deployPagesHits.length} active workflows: ${allFilesList}). ${remediation}`,
+        snippet: hit.snippet,
+        remediation,
+      };
+      const existing = files[hit.fileIndex]!;
+      files[hit.fileIndex] = {
+        ...existing,
+        ok: false,
+        findings: [...existing.findings, dupFinding],
+        remainingFindings: [...existing.remainingFindings, dupFinding],
+      };
+      totalFindings += 1;
+      remainingFindings += 1;
+    }
   }
 
   return {
@@ -1024,9 +1087,131 @@ export function hardenWorkflowsInDir(
 /** Canonical alias for `hardenWorkflowsInDir`. */
 export const runWorkflowHardening = hardenWorkflowsInDir;
 
+export interface RunFleetWorkflowHardeningOptions {
+  readonly mirrorRoot: string;
+  readonly check?: boolean;
+  readonly fix?: boolean;
+  readonly defaultTimeoutMinutes?: number;
+  readonly defaultRetentionDays?: number;
+}
+
+export interface FleetWorkflowHardeningRepoEntry {
+  readonly repo: string;
+  readonly repoDir: string;
+  readonly ok: boolean;
+  readonly workflowsScanned: number;
+  readonly totalFindings: number;
+  readonly remainingFindings: number;
+  readonly totalFixesApplied: number;
+  readonly modifiedFiles: readonly string[];
+  readonly result: HardenWorkflowsDirResult;
+}
+
+export interface FleetWorkflowHardeningResult {
+  readonly schema: typeof WF_HARDEN_FLEET_SCHEMA;
+  readonly abiMagic: typeof B8G_ABI_MAGIC_V3;
+  readonly mirrorRoot: string;
+  readonly mode: 'check' | 'fix';
+  readonly ok: boolean;
+  readonly reposScanned: number;
+  readonly passedRepos: number;
+  readonly failedRepos: number;
+  readonly workflowsScanned: number;
+  readonly totalFindings: number;
+  readonly remainingFindings: number;
+  readonly totalFixesApplied: number;
+  readonly modifiedFiles: readonly string[];
+  readonly repos: readonly FleetWorkflowHardeningRepoEntry[];
+}
+
+/**
+ * Audits or autofixes all active mirrored repositories under `mirrorRoot` in a single pass.
+ */
+export function runFleetWorkflowHardening(
+  options: RunFleetWorkflowHardeningOptions,
+): FleetWorkflowHardeningResult {
+  const resolvedRoot = resolve(options.mirrorRoot);
+  const fix = options.fix === true && options.check !== true;
+  const repoDirs: Array<{ readonly name: string; readonly dir: string }> = [];
+
+  if (existsSync(resolvedRoot)) {
+    for (const entry of readdirSync(resolvedRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name === '.git' || entry.name === 'node_modules') continue;
+      const candidateDir = join(resolvedRoot, entry.name);
+      if (
+        existsSync(join(candidateDir, '.github', 'workflows')) ||
+        existsSync(join(candidateDir, '.git')) ||
+        existsSync(join(candidateDir, 'holo-ci.json'))
+      ) {
+        repoDirs.push({ name: entry.name, dir: candidateDir });
+      }
+    }
+  }
+  repoDirs.sort((a, b) => a.name.localeCompare(b.name));
+
+  const repos: FleetWorkflowHardeningRepoEntry[] = [];
+  const modifiedFiles: string[] = [];
+  let passedRepos = 0;
+  let failedRepos = 0;
+  let workflowsScanned = 0;
+  let totalFindings = 0;
+  let remainingFindings = 0;
+  let totalFixesApplied = 0;
+
+  for (const { name, dir } of repoDirs) {
+    const res = hardenWorkflowsInDir(dir, {
+      fix,
+      defaultTimeoutMinutes: options.defaultTimeoutMinutes,
+      defaultRetentionDays: options.defaultRetentionDays,
+    });
+    if (res.ok) {
+      passedRepos += 1;
+    } else {
+      failedRepos += 1;
+    }
+    workflowsScanned += res.workflowsScanned;
+    totalFindings += res.totalFindings;
+    remainingFindings += res.remainingFindings;
+    totalFixesApplied += res.totalFixesApplied;
+    for (const mod of res.modifiedFiles) {
+      modifiedFiles.push(`${name}/${mod}`);
+    }
+    repos.push({
+      repo: name,
+      repoDir: dir,
+      ok: res.ok,
+      workflowsScanned: res.workflowsScanned,
+      totalFindings: res.totalFindings,
+      remainingFindings: res.remainingFindings,
+      totalFixesApplied: res.totalFixesApplied,
+      modifiedFiles: res.modifiedFiles,
+      result: res,
+    });
+  }
+
+  return {
+    schema: WF_HARDEN_FLEET_SCHEMA,
+    abiMagic: B8G_ABI_MAGIC_V3,
+    mirrorRoot: resolvedRoot,
+    mode: fix ? 'fix' : 'check',
+    ok: failedRepos === 0,
+    reposScanned: repos.length,
+    passedRepos,
+    failedRepos,
+    workflowsScanned,
+    totalFindings,
+    remainingFindings,
+    totalFixesApplied,
+    modifiedFiles,
+    repos,
+  };
+}
+
 export interface ParsedWfHardenCliArgs {
   readonly fix: boolean;
   readonly cwd: string;
+  readonly fleetRoot?: string;
   readonly json: boolean;
   readonly help: boolean;
   readonly defaultTimeoutMinutes?: number;
@@ -1038,13 +1223,14 @@ export function getWfHardenHelpText(): string {
     'wf-harden — Generic GitHub Actions workflow hardening auditor & autofixer',
     '',
     'Usage:',
-    '  node holo-ci/wf-harden.mts [--check | --fix] [--cwd <dir>] [--json]',
+    '  node holo-ci/wf-harden.mts [--check | --fix] [--cwd <dir> | --fleet <mirrorRoot>] [--json]',
     '                             [--timeout-minutes <n>] [--retention-days <n>]',
     '',
     'Options:',
     '  --check                Audit workflows without modifying files (default)',
     '  --fix                  Deterministically autofix workflows in-place',
     '  --cwd <dir>            Target repository root (default: process.cwd())',
+    '  --fleet <mirrorRoot>   Audit or autofix all active repository mirrors under <mirrorRoot>',
     '  --json                 Emit structured JSON report to stdout',
     `  --timeout-minutes <n>  Default timeout-minutes to insert (default: ${DEFAULT_TIMEOUT_MINUTES})`,
     `  --retention-days <n>   Default artifact retention-days to insert (default: ${DEFAULT_RETENTION_DAYS})`,
@@ -1056,6 +1242,7 @@ export function getWfHardenHelpText(): string {
 export function parseWfHardenCliArgs(argv: readonly string[]): ParsedWfHardenCliArgs {
   let fix = false;
   let cwd = process.cwd();
+  let fleetRoot: string | undefined;
   let json = false;
   let help = false;
   let defaultTimeoutMinutes: number | undefined;
@@ -1073,6 +1260,8 @@ export function parseWfHardenCliArgs(argv: readonly string[]): ParsedWfHardenCli
       json = true;
     } else if (arg === '--cwd' && i + 1 < argv.length) {
       cwd = resolve(argv[++i]!);
+    } else if (arg === '--fleet' && i + 1 < argv.length) {
+      fleetRoot = resolve(argv[++i]!);
     } else if (arg === '--timeout-minutes' && i + 1 < argv.length) {
       const parsed = Number(argv[++i]!);
       if (!Number.isInteger(parsed) || parsed <= 0) {
@@ -1093,6 +1282,7 @@ export function parseWfHardenCliArgs(argv: readonly string[]): ParsedWfHardenCli
   return {
     fix,
     cwd,
+    ...(fleetRoot ? { fleetRoot } : {}),
     json,
     help,
     ...(defaultTimeoutMinutes !== undefined ? { defaultTimeoutMinutes } : {}),
@@ -1103,11 +1293,43 @@ export function parseWfHardenCliArgs(argv: readonly string[]): ParsedWfHardenCli
 export function runWfHardenCli(argv: readonly string[]): {
   readonly exitCode: number;
   readonly result?: HardenWorkflowsDirResult;
+  readonly fleetResult?: FleetWorkflowHardeningResult;
 } {
   const opts = parseWfHardenCliArgs(argv);
   if (opts.help) {
     process.stdout.write(getWfHardenHelpText());
     return { exitCode: 0 };
+  }
+
+  if (opts.fleetRoot) {
+    const fleetResult = runFleetWorkflowHardening({
+      mirrorRoot: opts.fleetRoot,
+      check: !opts.fix,
+      fix: opts.fix,
+      defaultTimeoutMinutes: opts.defaultTimeoutMinutes,
+      defaultRetentionDays: opts.defaultRetentionDays,
+    });
+
+    if (opts.json) {
+      process.stdout.write(`${JSON.stringify(fleetResult, null, 2)}\n`);
+    } else {
+      const status = fleetResult.ok ? 'PASS' : 'FAIL';
+      process.stdout.write(
+        `[wf-harden] fleet ${fleetResult.mode} ${fleetResult.reposScanned} repo(s), ${fleetResult.workflowsScanned} workflow(s) -> ${status} (passed=${fleetResult.passedRepos}, failed=${fleetResult.failedRepos}, findings=${fleetResult.totalFindings}, fixed=${fleetResult.totalFixesApplied}, remaining=${fleetResult.remainingFindings})\n`,
+      );
+      for (const repoEntry of fleetResult.repos) {
+        for (const file of repoEntry.result.files) {
+          const reportFindings = opts.fix ? file.remainingFindings : file.findings;
+          for (const finding of reportFindings) {
+            process.stdout.write(
+              `  [${repoEntry.repo}][${finding.rule}] ${finding.file}:${finding.line} ${finding.message}\n`,
+            );
+          }
+        }
+      }
+    }
+
+    return { exitCode: fleetResult.ok ? 0 : 1, fleetResult };
   }
 
   const result = hardenWorkflowsInDir(opts.cwd, {

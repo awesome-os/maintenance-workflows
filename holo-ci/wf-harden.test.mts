@@ -10,7 +10,10 @@ import {
   auditAndHardenWorkflowYaml,
   hardenWorkflowsInDir,
   parseWfHardenCliArgs,
+  runFleetWorkflowHardening,
   runWfHardenCli,
+  runWorkflowHardening,
+  WF_HARDEN_FLEET_SCHEMA,
   WF_HARDEN_SCHEMA,
 } from './wf-harden.mts';
 
@@ -338,5 +341,144 @@ describe('holo-ci/wf-harden generic workflow hardener', () => {
         process.stdout.write = originalWrite;
       }
     });
+  });
+
+  it('detects duplicate-pages-workflow when >1 active workflow invokes actions/deploy-pages', () => {
+    withTempRepo((repoDir, workflowsDir) => {
+      const canonicalPages = [
+        'name: Deploy Pages',
+        'on:',
+        '  push:',
+        '    branches: [main]',
+        'concurrency:',
+        '  group: pages',
+        '  cancel-in-progress: false',
+        'jobs:',
+        '  deploy:',
+        '    runs-on: ubuntu-latest',
+        '    timeout-minutes: 15',
+        '    steps:',
+        '      - uses: actions/checkout@v7',
+        '      - uses: actions/configure-pages@v6',
+        '      - uses: actions/upload-pages-artifact@v5',
+        '      - uses: actions/deploy-pages@v5',
+        '',
+      ].join('\n');
+
+      const redundantPages = [
+        'name: Legacy Pages',
+        'on:',
+        '  push:',
+        '    branches: [main]',
+        'concurrency:',
+        '  group: legacy-pages',
+        '  cancel-in-progress: false',
+        'jobs:',
+        '  deploy:',
+        '    runs-on: ubuntu-latest',
+        '    timeout-minutes: 15',
+        '    steps:',
+        '      - uses: actions/checkout@v7',
+        '      - uses: actions/deploy-pages@v5',
+        '',
+      ].join('\n');
+
+      writeFileSync(join(workflowsDir, 'deploy-pages.yml'), canonicalPages, 'utf8');
+      const singleRes = runWorkflowHardening(repoDir, { fix: false });
+      assert.equal(singleRes.ok, true);
+      assert.equal(singleRes.totalFindings, 0);
+
+      writeFileSync(join(workflowsDir, 'pages.yml'), redundantPages, 'utf8');
+      const dupRes = runWorkflowHardening(repoDir, { fix: false });
+      assert.equal(dupRes.ok, false);
+      assert.equal(dupRes.totalFindings, 1);
+      assert.equal(dupRes.remainingFindings, 1);
+
+      const canonicalEntry = dupRes.files.find((f) => f.fileName === '.github/workflows/deploy-pages.yml');
+      const redundantEntry = dupRes.files.find((f) => f.fileName === '.github/workflows/pages.yml');
+      assert.equal(canonicalEntry?.ok, true);
+      assert.equal(redundantEntry?.ok, false);
+      assert.equal(redundantEntry?.findings[0]?.rule, 'duplicate-pages-workflow');
+      assert.equal(redundantEntry?.findings[0]?.ruleId, 'duplicate-pages-workflow');
+      assert.match(redundantEntry?.findings[0]?.message ?? '', /pages\.yml/);
+      assert.match(redundantEntry?.findings[0]?.remediation ?? '', /deploy-pages\.yml/);
+    });
+  });
+
+  it('aggregates and autofixes multiple mirrored repos via runFleetWorkflowHardening and --fleet CLI', () => {
+    const mirrorRoot = mkdtempSync(join(tmpdir(), 'holo-wf-fleet-'));
+    try {
+      const repoA = join(mirrorRoot, 'repo-alpha', '.github', 'workflows');
+      const repoB = join(mirrorRoot, 'repo-beta', '.github', 'workflows');
+      mkdirSync(repoA, { recursive: true });
+      mkdirSync(repoB, { recursive: true });
+
+      writeFileSync(
+        join(repoA, 'ci.yml'),
+        [
+          'name: Alpha CI',
+          'on: push',
+          'concurrency:',
+          '  group: alpha-${{ github.ref }}',
+          '  cancel-in-progress: true',
+          'jobs:',
+          '  test:',
+          '    runs-on: ubuntu-latest',
+          '    timeout-minutes: 15',
+          '    steps:',
+          '      - uses: actions/checkout@v7',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+
+      writeFileSync(
+        join(repoB, 'ci.yml'),
+        [
+          'name: Beta CI',
+          'on: push',
+          'jobs:',
+          '  test:',
+          '    runs-on: ubuntu-latest',
+          '    steps:',
+          '      - uses: actions/checkout@v4',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const checkFleet = runFleetWorkflowHardening({ mirrorRoot, check: true });
+      assert.equal(checkFleet.schema, WF_HARDEN_FLEET_SCHEMA);
+      assert.equal(checkFleet.ok, false);
+      assert.equal(checkFleet.reposScanned, 2);
+      assert.equal(checkFleet.passedRepos, 1);
+      assert.equal(checkFleet.failedRepos, 1);
+      assert.equal(checkFleet.workflowsScanned, 2);
+      assert.ok(checkFleet.totalFindings >= 3);
+
+      const parsed = parseWfHardenCliArgs(['--fix', '--fleet', mirrorRoot, '--json']);
+      assert.equal(parsed.fix, true);
+      assert.equal(parsed.fleetRoot, resolve(mirrorRoot));
+
+      const originalWrite = process.stdout.write.bind(process.stdout);
+      const chunks: string[] = [];
+      process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+        chunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+        return true;
+      }) as typeof process.stdout.write;
+
+      try {
+        const fixCli = runWfHardenCli(['--fix', '--fleet', mirrorRoot, '--json']);
+        assert.equal(fixCli.exitCode, 0);
+        assert.equal(fixCli.fleetResult?.ok, true);
+        assert.equal(fixCli.fleetResult?.passedRepos, 2);
+        assert.equal(fixCli.fleetResult?.failedRepos, 0);
+        assert.deepEqual(fixCli.fleetResult?.modifiedFiles, ['repo-beta/.github/workflows/ci.yml']);
+      } finally {
+        process.stdout.write = originalWrite;
+      }
+    } finally {
+      rmSync(mirrorRoot, { recursive: true, force: true });
+    }
   });
 });

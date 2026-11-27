@@ -8,6 +8,7 @@ import {
 } from './audit-stack.mts';
 import { runBoundaryAudit } from './boundary.mts';
 import { runBumpAsync } from './bump.mts';
+import { collectFleetForensics } from './fleet-forensics.mts';
 import { runLockCompat } from './lock-compat.mts';
 import { runMaintain } from './maintain.mts';
 import { runPack } from './pack.mts';
@@ -23,7 +24,7 @@ import {
 import { runSync } from './sync.mts';
 import { buildReceipt, emitTelemetry } from './telemetry.mts';
 import { runVerify } from './verify.mts';
-import { hardenWorkflowsInDir } from './wf-harden.mts';
+import { hardenWorkflowsInDir, runFleetWorkflowHardening } from './wf-harden.mts';
 
 export interface ParsedCliArgs {
   phase: HoloCiPhase;
@@ -39,8 +40,13 @@ export interface ParsedCliArgs {
   dryRun: boolean;
   check: boolean;
   fix: boolean;
+  fleetRoot?: string;
   timeoutMinutes?: number;
   retentionDays?: number;
+  owner?: string;
+  repos?: string[];
+  hours?: number;
+  slowSec?: number;
   fetchUpstream: boolean;
   applyPins: boolean;
   casDir?: string;
@@ -72,6 +78,7 @@ const VALID_PHASES = new Set<HoloCiPhase>([
   'boundary-audit',
   'wf-harden',
   'audit-stack',
+  'fleet-forensics',
 ]);
 
 const VALID_ECOSYSTEMS = new Set<HoloCiLockCompatEcosystem>([
@@ -110,8 +117,9 @@ export function getHelpText(): string {
     '  init         Scaffold a starter holo-ci.json manifest in the target directory',
     '  lock-compat  Synthesize zero-copy CAS v11 lock/metadata projections (npm|cargo|uv|go|vcpkg|winget|apt|composer|rubygems|all)',
     '  boundary-audit  Run Chromium-style checkdeps & 0-100 architectural boundary audit (boundary.json)',
-    '  wf-harden    Audit or deterministically autofix GitHub Actions workflows (--check | --fix)',
+    '  wf-harden    Audit or deterministically autofix GitHub Actions workflows (--check | --fix | --fleet <mirrorRoot>)',
     '  audit-stack  Run pluggable programmatic audit stack (--mode fail-fast|exhaust) and emit b8g.audit-push.v1',
+    '  fleet-forensics  Single-process GitHub Actions fleet forensics scanner (failed, cancelled, slow jobs)',
     '',
     'Options:',
     '  --config <path>        Path to holo-ci.json (default: holo-ci.json)',
@@ -128,8 +136,13 @@ export function getHelpText(): string {
     '  --dry-run              Preview `bump` or `lock-compat` without writing files',
     '  --check                Audit workflows without modifying files in `wf-harden` (default)',
     '  --fix                  Autofix workflows in-place in `wf-harden`',
+    '  --fleet <mirrorRoot>   Audit or autofix all active repository mirrors under <mirrorRoot> in `wf-harden`',
     '  --timeout-minutes <n>  Default job timeout-minutes for `wf-harden`',
     '  --retention-days <n>   Default upload-artifact retention-days for `wf-harden`',
+    '  --owner <org>          GitHub organization/owner for `fleet-forensics` (default: awesome-os)',
+    '  --repos <a,b>          Comma-separated repo names for `fleet-forensics`',
+    '  --hours <n>            Lookback window in hours for `fleet-forensics` (default: 4)',
+    '  --slow-sec <n>         Slow job threshold in seconds for `fleet-forensics` (default: 300)',
     '  --repo <name>          Repository identifier for `audit-stack` (default: manifest name or cwd basename)',
     '  --mode <mode>          Execution mode for `audit-stack`: fail-fast|exhaust (default: fail-fast)',
     '  --telemetry-out <path> Append holo-rule-violation.v1 JSONL telemetry during `audit-stack`',
@@ -164,8 +177,13 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
   let dryRun = false;
   let check = true;
   let fix = false;
+  let fleetRoot: string | undefined;
   let timeoutMinutes: number | undefined;
   let retentionDays: number | undefined;
+  let owner: string | undefined;
+  let repos: string[] | undefined;
+  let hours: number | undefined;
+  let slowSec: number | undefined;
   let fetchUpstream = false;
   let applyPins = false;
   let casDir: string | undefined;
@@ -212,6 +230,29 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     } else if (arg === '--fix') {
       fix = true;
       check = false;
+    } else if (arg === '--fleet' && argv[i + 1]) {
+      fleetRoot = resolve(argv[++i]);
+    } else if (arg === '--owner' && argv[i + 1]) {
+      owner = argv[++i].trim();
+    } else if (arg === '--repos' && argv[i + 1]) {
+      repos = argv[++i]
+        .split(',')
+        .map((r) => r.trim())
+        .filter((r) => r.length > 0);
+    } else if (arg === '--hours' && argv[i + 1]) {
+      const rawHours = argv[++i];
+      const parsedHours = Number(rawHours);
+      if (!Number.isFinite(parsedHours) || parsedHours <= 0) {
+        throw new Error(`Invalid --hours "${rawHours}" (expected positive number)`);
+      }
+      hours = parsedHours;
+    } else if (arg === '--slow-sec' && argv[i + 1]) {
+      const rawSlow = argv[++i];
+      const parsedSlow = Number(rawSlow);
+      if (!Number.isFinite(parsedSlow) || parsedSlow <= 0) {
+        throw new Error(`Invalid --slow-sec "${rawSlow}" (expected positive number)`);
+      }
+      slowSec = parsedSlow;
     } else if (arg === '--timeout-minutes' && argv[i + 1]) {
       const rawTimeout = argv[++i];
       const parsedTimeout = Number(rawTimeout);
@@ -309,8 +350,13 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     dryRun,
     check,
     fix,
+    ...(fleetRoot ? { fleetRoot } : {}),
     ...(timeoutMinutes !== undefined ? { timeoutMinutes } : {}),
     ...(retentionDays !== undefined ? { retentionDays } : {}),
+    ...(owner ? { owner } : {}),
+    ...(repos ? { repos } : {}),
+    ...(hours !== undefined ? { hours } : {}),
+    ...(slowSec !== undefined ? { slowSec } : {}),
     fetchUpstream,
     applyPins,
     ...(casDir ? { casDir } : {}),
@@ -441,25 +487,65 @@ export async function executeCli(argv: string[]): Promise<{ exitCode: number; re
       ...(errors ? { errors } : {}),
     });
   } else if (opts.phase === 'wf-harden') {
-    const wfHarden = hardenWorkflowsInDir(opts.cwd, {
-      fix: opts.fix,
-      defaultTimeoutMinutes: opts.timeoutMinutes,
-      defaultRetentionDays: opts.retentionDays,
+    const configFullPath = resolve(opts.cwd, opts.configPath);
+    const manifest: HoloCiManifest = existsSync(configFullPath)
+      ? loadManifest(opts.configPath, opts.cwd)
+      : {
+          schema: HOLO_CI_SCHEMA,
+          name: opts.name ?? basename(opts.fleetRoot ?? opts.cwd),
+          kind: opts.kind ?? 'app',
+        };
+    if (opts.fleetRoot) {
+      const wfHardenFleet = runFleetWorkflowHardening({
+        mirrorRoot: opts.fleetRoot,
+        check: opts.check,
+        fix: opts.fix,
+        defaultTimeoutMinutes: opts.timeoutMinutes,
+        defaultRetentionDays: opts.retentionDays,
+      });
+      receipt = buildReceipt({
+        manifest,
+        phase: 'wf-harden',
+        ok: wfHardenFleet.ok,
+        durationMs: Date.now() - start,
+        wfHardenFleet,
+      });
+    } else {
+      const wfHarden = hardenWorkflowsInDir(opts.cwd, {
+        fix: opts.fix,
+        defaultTimeoutMinutes: opts.timeoutMinutes,
+        defaultRetentionDays: opts.retentionDays,
+      });
+      receipt = buildReceipt({
+        manifest,
+        phase: 'wf-harden',
+        ok: wfHarden.ok,
+        durationMs: Date.now() - start,
+        wfHarden,
+      });
+    }
+  } else if (opts.phase === 'fleet-forensics') {
+    const fleetForensics = await collectFleetForensics({
+      owner: opts.owner,
+      repos: opts.repos,
+      hours: opts.hours,
+      slowThresholdSec: opts.slowSec,
+      concurrency: opts.concurrency,
     });
     const configFullPath = resolve(opts.cwd, opts.configPath);
     const manifest: HoloCiManifest = existsSync(configFullPath)
       ? loadManifest(opts.configPath, opts.cwd)
       : {
           schema: HOLO_CI_SCHEMA,
-          name: opts.name ?? basename(opts.cwd),
-          kind: opts.kind ?? 'app',
+          name: opts.name ?? fleetForensics.owner,
+          kind: opts.kind ?? 'control-plane',
         };
     receipt = buildReceipt({
       manifest,
-      phase: 'wf-harden',
-      ok: wfHarden.ok,
+      phase: 'fleet-forensics',
+      ok: fleetForensics.ok,
       durationMs: Date.now() - start,
-      wfHarden,
+      fleetForensics,
     });
   } else if (opts.phase === 'audit-stack') {
     const configFullPath = resolve(opts.cwd, opts.configPath);
@@ -480,15 +566,13 @@ export async function executeCli(argv: string[]): Promise<{ exitCode: number; re
       ...(opts.telemetryOutPath ? { telemetryOutPath: opts.telemetryOutPath } : {}),
       ...(opts.outFile ? { pushOutPath: opts.outFile } : {}),
     });
-    receipt = {
-      ...buildReceipt({
-        manifest,
-        phase: 'audit-stack',
-        ok: auditStack.ok,
-        durationMs: Date.now() - start,
-      }),
+    receipt = buildReceipt({
+      manifest,
+      phase: 'audit-stack',
+      ok: auditStack.ok,
+      durationMs: Date.now() - start,
       auditStack,
-    };
+    });
   } else {
     const manifest = loadManifest(opts.configPath, opts.cwd);
     if (opts.phase === 'verify') {
