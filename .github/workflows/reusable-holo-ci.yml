@@ -49,17 +49,17 @@ jobs:
       bumped: ${{ steps.run-holo-ci.outputs.bumped }}
     steps:
       - name: Checkout caller repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Checkout holo-ci runtime
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: awesome-os/maintenance-workflows
           ref: ${{ inputs.holo-ci-ref }}
           path: .holo-ci-runtime
 
       - name: Setup Node.js ${{ inputs.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node-version }}
 
@@ -116,7 +116,7 @@ jobs:
 
       - name: Upload holo-ci receipt
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: holo-ci-receipt-${{ inputs.phase }}
           path: holo-ci-receipt.ndjson

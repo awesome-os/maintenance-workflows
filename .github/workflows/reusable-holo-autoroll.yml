@@ -39,19 +39,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout caller repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.base-branch }}
 
       - name: Checkout holo-ci runtime
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: awesome-os/maintenance-workflows
           ref: ${{ inputs.holo-ci-ref }}
           path: .holo-ci-runtime
 
       - name: Setup Node.js 26
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '26'
 
