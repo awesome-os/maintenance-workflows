@@ -2027,4 +2027,145 @@ describe('holo-ci boundary-audit', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('uses segment-safe forbidden import matching, validates ABI header paths, and honors b8g-allow-http-ipc', () => {
+    const dir = makeTempDir('holo-ci-boundary-upgrades-');
+    try {
+      const badLoopback = ['http', '://', '127.0.0.1:9444'].join('');
+      mkdirSync(join(dir, 'sections', 'core'), { recursive: true });
+
+      // Segment boundary check: "...from './sections/sectium-browser-helper'" must NOT match "sections/sectium-browser"
+      // Also test prev-line & inline b8g-allow-http-ipc guards vs unguarded loopback URL
+      writeFileSync(
+        join(dir, 'sections', 'core', 'main.mts'),
+        [
+          "import { ok } from './sectium-browser-helper';",
+          `// b8g-allow-http-ipc: intentional documented endpoint`,
+          `export const docUrl1 = '${badLoopback}';`,
+          `export const docUrl2 = '${badLoopback}'; // b8g-allow-http-ipc`,
+          `export const badUrl = '${badLoopback}';`,
+          'export const sum = ok;',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+      writeFileSync(join(dir, 'sections', 'core', 'sectium-browser-helper.mts'), 'export const ok = 1;\n', 'utf8');
+      writeFileSync(
+        join(dir, 'sections', 'core', 'abi-golden.json'),
+        JSON.stringify({ schema: 'holo-abi-golden.v1', header: 'sections/core/missing_abi.h' }),
+        'utf8',
+      );
+      writeFileSync(
+        join(dir, 'boundary.json'),
+        JSON.stringify({
+          schema: HOLO_BOUNDARY_SCHEMA,
+          plane: 1,
+          forbiddenImports: ['sectium-browser'],
+          abiGoldenFiles: ['sections/core/abi-golden.json'],
+          scanSourceHttpIpc: true,
+        }),
+        'utf8',
+      );
+
+      const res = runBoundaryAudit({ cwd: dir });
+      assert.equal(res.ok, false);
+      assert.deepEqual(
+        res.violations.map((v) => v.rule),
+        ['httpIpc', 'abiGolden'],
+      );
+      assert.match(res.violations[1]!.message, /missing header/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('enforces DAG cycles (Tarjan SCC) and layer inversions with allowlist & host exemption', () => {
+    const dir = makeTempDir('holo-ci-boundary-dag-layers-');
+    try {
+      mkdirSync(join(dir, 'sections', 'a'), { recursive: true });
+      mkdirSync(join(dir, 'sections', 'b'), { recursive: true });
+      mkdirSync(join(dir, 'intersections', 'x'), { recursive: true });
+
+      // Core cycle: sections/a <-> sections/b, plus upward inversion sections/a -> intersections/x
+      writeFileSync(
+        join(dir, 'sections', 'a', 'index.mts'),
+        [
+          "import { b } from '../b/index.mts';",
+          "import type { OnlyType } from '../../intersections/x/index.mts';",
+          "import { x } from '../../intersections/x/index.mts';",
+          'export const a = b + x;',
+          'export type T = OnlyType;',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+      writeFileSync(
+        join(dir, 'sections', 'b', 'index.mts'),
+        "import { a } from '../a/index.mts';\nexport const b = 1 + (a ? 0 : 0);\n",
+        'utf8',
+      );
+      // Host file (.host.mts) must be exempt from DAG & layer checks
+      writeFileSync(
+        join(dir, 'sections', 'b', 'cli.host.mts'),
+        "import { x } from '../../intersections/x/index.mts';\nexport const hostVal = x;\n",
+        'utf8',
+      );
+      writeFileSync(
+        join(dir, 'intersections', 'x', 'index.mts'),
+        'export type OnlyType = string;\nexport const x = 2;\n',
+        'utf8',
+      );
+      writeFileSync(
+        join(dir, 'boundary.json'),
+        JSON.stringify({
+          schema: HOLO_BOUNDARY_SCHEMA,
+          plane: 4,
+          enforceDag: true,
+          enforceLayers: true,
+          layerRules: [
+            { prefix: 'sections/', rank: 1 },
+            { prefix: 'intersections/', rank: 2 },
+          ],
+          scanSourceHttpIpc: true,
+        }),
+        'utf8',
+      );
+
+      const res = runBoundaryAudit({ cwd: dir });
+      assert.equal(res.ok, false);
+      assert.equal(
+        res.violations.filter((v) => v.rule === 'layerInversion').length,
+        1,
+      );
+      assert.equal(
+        res.violations.filter((v) => v.rule === 'cyclicImport').length,
+        1,
+      );
+
+      // Allowlisting the specific edges clears both violations cleanly
+      const cleanRes = runBoundaryAudit({
+        cwd: dir,
+        manifest: {
+          schema: HOLO_BOUNDARY_SCHEMA,
+          plane: 4,
+          enforceDag: true,
+          enforceLayers: true,
+          layerRules: [
+            { prefix: 'sections/', rank: 1 },
+            { prefix: 'intersections/', rank: 2 },
+          ],
+          allowedGeometryEdges: [
+            'sections/a -> intersections/x',
+            'sections/a -> sections/b',
+            'sections/b -> sections/a',
+          ],
+          scanSourceHttpIpc: true,
+        },
+      });
+      assert.equal(cleanRes.ok, true);
+      assert.equal(cleanRes.violations.length, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

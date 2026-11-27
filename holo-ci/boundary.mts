@@ -148,12 +148,8 @@ function matchesImportPattern(specifier: string, pattern: string): boolean {
     try {
       return new RegExp(body, flags).test(normalized);
     } catch {
-      return normalized.includes(pattern);
+      return normalized === pattern;
     }
-  }
-
-  if (normalized.includes(pattern)) {
-    return true;
   }
 
   if (/[\^$*+?()[\]{}|\\]/.test(pattern)) {
@@ -164,7 +160,13 @@ function matchesImportPattern(specifier: string, pattern: string): boolean {
     }
   }
 
-  return false;
+  const normPat = pattern.replace(/\\/g, '/');
+  if (normalized === normPat) return true;
+  if (normPat.endsWith('/')) {
+    return normalized.includes(normPat);
+  }
+  const escaped = normPat.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|/|\\\\)${escaped}(?:$|/|\\\\)`).test(normalized);
 }
 
 function countParentTraversals(specifier: string): number {
@@ -234,6 +236,22 @@ function evaluateAbiContract(
             message: `ABI golden file "${normRel}" must contain a JSON object or array`,
           });
           continue;
+        }
+        const goldenObj = parsed as { header?: unknown };
+        if (typeof goldenObj.header === 'string' && goldenObj.header.trim().length > 0) {
+          const headerRel = goldenObj.header.trim();
+          const headerFull = resolve(cwd, headerRel);
+          const headerRelativeToManifest = resolve(fullPath, '..', headerRel);
+          if (!existsSync(headerFull) && !existsSync(headerRelativeToManifest)) {
+            violations.push({
+              rule: 'abiGolden',
+              file: normRel,
+              line: 1,
+              snippet: `header: ${headerRel}`,
+              message: `ABI golden file "${normRel}" references missing header "${headerRel}"`,
+            });
+            continue;
+          }
         }
         validCount++;
       } catch (err) {
@@ -306,22 +324,84 @@ export function runBoundaryAudit(options: RunBoundaryAuditOptions = {}): HoloCiB
   const scanSourceHttpIpc = manifest?.scanSourceHttpIpc ?? true;
   const forbiddenImports = manifest?.forbiddenImports ?? [];
   const allowedImports = manifest?.allowedImports ?? [];
+  const enforceDag = manifest?.enforceDag === true;
+  const enforceLayers = manifest?.enforceLayers === true;
+  const layerRules = manifest?.layerRules ?? [];
+  const allowedGeometryEdges = new Set(manifest?.allowedGeometryEdges ?? []);
 
   const sourceFiles = collectSourceFiles(cwd, manifest);
   let forbiddenCount = 0;
   let traversalCount = 0;
   let httpIpcCount = 0;
+  let geometryViolations = 0;
+
+  const unitOfRel = (relPath: string): string => {
+    const parts = relPath.split('/');
+    if (parts[0] === 'packages' && parts[1] === '@awesome-os' && parts[2]) {
+      return `packages/@awesome-os/${parts[2]}`;
+    }
+    if ((parts[0] === 'sections' || parts[0] === 'intersections' || parts[0] === 'packages') && parts[1]) {
+      return `${parts[0]}/${parts[1]}`;
+    }
+    return parts[0] ?? 'root';
+  };
+  const rankOfUnit = (unit: string): number | undefined => {
+    for (const r of layerRules) {
+      if (unit === r.prefix || unit.startsWith(`${r.prefix}/`) || unit.startsWith(r.prefix)) {
+        return r.rank;
+      }
+    }
+    return undefined;
+  };
+  const runtimeAdj = new Map<string, Set<string>>();
 
   for (const filePath of sourceFiles) {
     const relPath = relative(cwd, filePath).replace(/\\/g, '/');
     const lines = readFileSync(filePath, 'utf8').split(/\r?\n/);
+    const srcUnit = unitOfRel(relPath);
+    if (!runtimeAdj.has(srcUnit)) runtimeAdj.set(srcUnit, new Set());
+    const isHostFile =
+      relPath.startsWith('scripts/') ||
+      /\.host\.(mts|ts|mjs|js)$/.test(relPath) ||
+      /\/(?:cli|server|maintenance)\.(mts|ts)$/.test(relPath);
 
     for (let i = 0; i < lines.length; i++) {
       const lineText = lines[i];
-      if (lineText.includes('holo-ci-allow-guard')) continue;
+      const prevLine = i > 0 ? lines[i - 1] : '';
+      const hasLineAllowGuard =
+        lineText.includes('holo-ci-allow-guard') ||
+        lineText.includes('b8g-allow-http-ipc') ||
+        ((prevLine.trim().startsWith('//') || prevLine.trim().startsWith('*')) &&
+          (prevLine.includes('holo-ci-allow-guard') || prevLine.includes('b8g-allow-http-ipc')));
+      if (hasLineAllowGuard) continue;
 
       const specifiers = extractLineSpecifiers(lineText);
+      const isTypeOnlyImport = /^\s*(?:import|export)\s+type\b/.test(lineText);
       for (const spec of specifiers) {
+        if ((enforceDag || enforceLayers) && spec.startsWith('.') && !isTypeOnlyImport && !isHostFile) {
+          const targetAbs = resolve(filePath, '..', spec);
+          const dstRel = relative(cwd, targetAbs).replace(/\\/g, '/');
+          const dstUnit = unitOfRel(dstRel);
+          if (dstUnit !== srcUnit && !dstRel.startsWith('..')) {
+            runtimeAdj.get(srcUnit)!.add(dstUnit);
+            const edgeKey = `${srcUnit} -> ${dstUnit}`;
+            if (enforceLayers && !allowedGeometryEdges.has(edgeKey)) {
+              const srcRank = rankOfUnit(srcUnit);
+              const dstRank = rankOfUnit(dstUnit);
+              if (srcRank !== undefined && dstRank !== undefined && srcRank < dstRank) {
+                geometryViolations++;
+                violations.push({
+                  rule: 'layerInversion',
+                  file: relPath,
+                  line: i + 1,
+                  snippet: lineText.trim().slice(0, 160),
+                  message: `Layer inversion (${edgeKey}): rank ${srcRank} cannot depend upward on rank ${dstRank}`,
+                });
+              }
+            }
+          }
+        }
+
         const isExplicitlyAllowed = allowedImports.some((pat) => matchesImportPattern(spec, pat));
         if (isExplicitlyAllowed) continue;
 
@@ -369,9 +449,61 @@ export function runBoundaryAudit(options: RunBoundaryAuditOptions = {}): HoloCiB
     }
   }
 
-  const dependencyPurity = Math.max(0, 20 - (forbiddenCount * 5 + traversalCount * 5));
+  if (enforceDag) {
+    let idx = 0;
+    const indices = new Map<string, number>();
+    const lowlink = new Map<string, number>();
+    const stack: string[] = [];
+    const onStack = new Set<string>();
+    const sc = (v: string): void => {
+      indices.set(v, idx);
+      lowlink.set(v, idx);
+      idx++;
+      stack.push(v);
+      onStack.add(v);
+      for (const w of runtimeAdj.get(v) ?? []) {
+        if (!indices.has(w)) {
+          sc(w);
+          lowlink.set(v, Math.min(lowlink.get(v)!, lowlink.get(w)!));
+        } else if (onStack.has(w)) {
+          lowlink.set(v, Math.min(lowlink.get(v)!, indices.get(w)!));
+        }
+      }
+      if (lowlink.get(v) === indices.get(v)) {
+        const scc: string[] = [];
+        while (true) {
+          const w = stack.pop()!;
+          onStack.delete(w);
+          scc.push(w);
+          if (w === v) break;
+        }
+        if (scc.length > 1) {
+          scc.sort();
+          const sccSet = new Set(scc);
+          const unallowlisted = scc.some((u) =>
+            [...(runtimeAdj.get(u) ?? [])].some((w) => sccSet.has(w) && !allowedGeometryEdges.has(`${u} -> ${w}`)),
+          );
+          if (unallowlisted) {
+            geometryViolations++;
+            violations.push({
+              rule: 'cyclicImport',
+              file: scc[0]!,
+              line: 1,
+              snippet: scc.join(' <-> '),
+              message: `Strongly connected import cycle detected (${scc.length} units): [${scc.join(', ')}]`,
+            });
+          }
+        }
+      }
+    };
+    for (const u of [...runtimeAdj.keys()].sort()) {
+      if (!indices.has(u)) sc(u);
+    }
+  }
+
+  const dependencyPurity = Math.max(0, 20 - (forbiddenCount * 5 + traversalCount * 5 + geometryViolations * 5));
   const encapBase = manifestFound ? 20 : 12;
-  const encapsulation = Math.max(0, encapBase - traversalCount * (manifestFound ? 5 : 4));
+  const encapsulation = Math.max(0, encapBase - (traversalCount + geometryViolations) * (manifestFound ? 5 : 4));
   const ipcCompliance = httpIpcCount === 0 ? 20 : 0;
   const abiContract = evaluateAbiContract(cwd, manifest, configPath, violations);
   const governance = evaluateGovernance(cwd);

@@ -286,6 +286,11 @@ export interface HoloCiLockCompatResult {
 
 export type HoloBoundaryPlane = 1 | 2 | 3 | 4 | 5;
 
+export interface HoloBoundaryLayerRule {
+  prefix: string;
+  rank: number;
+}
+
 export interface HoloBoundaryManifest {
   schema: 'holo-boundary.v1';
   plane?: HoloBoundaryPlane;
@@ -297,6 +302,10 @@ export interface HoloBoundaryManifest {
   maxParentTraversals?: number;
   scanSourceHttpIpc?: boolean;
   abiGoldenFiles?: string[];
+  enforceDag?: boolean;
+  enforceLayers?: boolean;
+  layerRules?: HoloBoundaryLayerRule[];
+  allowedGeometryEdges?: string[];
 }
 
 export type HoloCiBoundaryRule =
@@ -304,7 +313,9 @@ export type HoloCiBoundaryRule =
   | 'forbiddenImport'
   | 'parentTraversal'
   | 'httpIpc'
-  | 'abiGolden';
+  | 'abiGolden'
+  | 'cyclicImport'
+  | 'layerInversion';
 
 export interface HoloCiBoundaryViolation {
   rule: HoloCiBoundaryRule;
