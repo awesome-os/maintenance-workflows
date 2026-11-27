@@ -1,3 +1,5 @@
+<!-- DOC-STATIC-CORPUS -->
+
 # Awesome-OS Maintenance Workflows (`awesome-os/maintenance-workflows`)
 
 > **Centralized reusable GitHub Actions release, verification, & `holo-ci` runtime for all `awesome-os/*` repositories — zero-dependency Node 24/26 erasable-TS CI (`reusable-holo-ci.yml@v1`), 5-OS Zig C11 matrix builds (`win64`, `linux-x64`, `linux-arm64`, `macos-arm64`, `wasm32-wasi`), `.vsix` + Open VSX releases, `install.ps1` / `install.sh`, and `SHA512SUMS.txt` / `SHA256SUMS.txt`.**
