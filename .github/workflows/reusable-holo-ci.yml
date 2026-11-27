@@ -94,6 +94,13 @@ jobs:
               CLI_EXIT="${BOUNDARY_EXIT}"
             fi
           fi
+          if [ "${{ inputs.phase }}" = "verify" ] && [ -f scripts/doc-data-sync.mts ]; then
+            node scripts/doc-data-sync.mts check --json
+            DOC_SYNC_EXIT=$?
+            if [ "${DOC_SYNC_EXIT}" -ne 0 ]; then
+              CLI_EXIT="${DOC_SYNC_EXIT}"
+            fi
+          fi
           set -e
           BUMPED=$(node -e '
             const fs = require("node:fs");
