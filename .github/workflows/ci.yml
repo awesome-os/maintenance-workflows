@@ -41,3 +41,20 @@ jobs:
           name: holo-ci-receipt
           path: holo-ci-receipt.ndjson
           retention-days: 7
+
+  sync-v1-tag:
+    name: Sync Floating v1 Tag
+    needs: [holo-ci-self-test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Move v1 floating tag to github.sha
+        run: |
+          git tag -f v1 "$GITHUB_SHA"
+          git push -f origin refs/tags/v1
