@@ -52,10 +52,10 @@ jobs:
       packages: read
     steps:
       - name: Checkout caller repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Checkout holo-ci runtime
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: awesome-os/maintenance-workflows
           ref: ${{ inputs.holo-ci-ref }}
