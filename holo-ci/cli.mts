@@ -49,6 +49,7 @@ export interface ParsedCliArgs {
   slowSec?: number;
   fetchUpstream: boolean;
   applyPins: boolean;
+  shadowCanary: boolean;
   casDir?: string;
   outDir?: string;
   outFile?: string;
@@ -132,6 +133,7 @@ export function getHelpText(): string {
     '  --package <path>       Path to package.json for `bump` (default: package.json)',
     '  --fetch-upstream       Resolve latest upstream versions from GitHub for pins with upstreamRepo',
     '  --apply-pins           Update lagged upstreamPins in holo-ci.json during `bump`',
+    '  --shadow-canary        Run verify/abi-golden/SHA-512 canary gate before applying pins during `bump`',
     '  --cas-dir <dir>        Materialize CAS v11 content-addressed blobs during `pack`',
     '  --dry-run              Preview `bump` or `lock-compat` without writing files',
     '  --check                Audit workflows without modifying files in `wf-harden` (default)',
@@ -186,6 +188,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
   let slowSec: number | undefined;
   let fetchUpstream = false;
   let applyPins = false;
+  let shadowCanary = false;
   let casDir: string | undefined;
   let outDir: string | undefined;
   let outFile: string | undefined;
@@ -271,6 +274,8 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
       fetchUpstream = true;
     } else if (arg === '--apply-pins') {
       applyPins = true;
+    } else if (arg === '--shadow-canary') {
+      shadowCanary = true;
     } else if (arg === '--cas-dir' && argv[i + 1]) {
       casDir = argv[++i];
     } else if (arg === '--out' && argv[i + 1]) {
@@ -359,6 +364,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     ...(slowSec !== undefined ? { slowSec } : {}),
     fetchUpstream,
     applyPins,
+    shadowCanary,
     ...(casDir ? { casDir } : {}),
     ...(outDir ? { outDir } : {}),
     ...(outFile ? { outFile } : {}),
@@ -601,6 +607,7 @@ export async function executeCli(argv: string[]): Promise<{ exitCode: number; re
         dryRun: opts.dryRun,
         fetchUpstream: opts.fetchUpstream,
         applyPins: opts.applyPins,
+        shadowCanary: opts.shadowCanary,
         configPath: opts.configPath,
       });
       receipt = buildReceipt({

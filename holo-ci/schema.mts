@@ -206,6 +206,25 @@ export interface HoloCiPackageBumpResult {
   dryRun: boolean;
 }
 
+export interface HoloCiShadowCanaryDiff {
+  gate: 'verify' | 'abi-golden' | 'sha512';
+  target: string;
+  expected: string;
+  actual: string;
+  message: string;
+}
+
+export interface HoloCiShadowCanaryResult {
+  enabled: boolean;
+  ok: boolean;
+  held: boolean;
+  verifyOk: boolean;
+  abiGoldenOk: boolean;
+  sha512Ok: boolean;
+  sha512Checked: number;
+  diffs: HoloCiShadowCanaryDiff[];
+}
+
 export interface HoloCiBumpResult {
   ok: boolean;
   pins: HoloCiPinCheckResult[];
@@ -213,6 +232,7 @@ export interface HoloCiBumpResult {
   bumpedCount?: number;
   bumpedPins?: string[];
   applied?: boolean;
+  shadowCanary?: HoloCiShadowCanaryResult;
 }
 
 export interface HoloCiPackEntry {

@@ -1,13 +1,19 @@
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { runBoundaryAudit } from './boundary.mts';
 import {
+  B8G_ABI_MAGIC_V3,
   compareSemver,
   type HoloCiBumpResult,
   type HoloCiManifest,
   type HoloCiPackageBumpResult,
   type HoloCiPinCheckResult,
+  type HoloCiShadowCanaryDiff,
+  type HoloCiShadowCanaryResult,
   type HoloCiUpstreamPin,
 } from './schema.mts';
+import { runVerify } from './verify.mts';
 
 export function checkUpstreamPins(pins: HoloCiUpstreamPin[]): HoloCiPinCheckResult[] {
   return pins.map((pin) => {
@@ -169,6 +175,225 @@ export function runBump(
   };
 }
 
+function verifyAbiGoldenGate(
+  cwd: string,
+  configPath: string | undefined,
+  diffs: HoloCiShadowCanaryDiff[],
+): boolean {
+  const boundaryFull = resolve(cwd, 'boundary.json');
+  if (existsSync(boundaryFull)) {
+    const audit = runBoundaryAudit({ cwd, boundaryPath: 'boundary.json', configPath });
+    const abiViolations = audit.violations.filter(
+      (v) => v.rule === 'abiGolden' || v.rule === 'boundaryManifest',
+    );
+    for (const v of abiViolations) {
+      diffs.push({
+        gate: 'abi-golden',
+        target: v.file,
+        expected: 'valid ABI golden contract',
+        actual: v.snippet,
+        message: v.message,
+      });
+    }
+    return abiViolations.length === 0;
+  }
+
+  const standaloneGolden = resolve(cwd, 'abi-golden.json');
+  if (!existsSync(standaloneGolden)) return true;
+
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(standaloneGolden, 'utf8'));
+    if (!parsed || typeof parsed !== 'object') {
+      diffs.push({
+        gate: 'abi-golden',
+        target: 'abi-golden.json',
+        expected: 'JSON object',
+        actual: typeof parsed,
+        message: 'abi-golden.json must contain a JSON object',
+      });
+      return false;
+    }
+    const obj = parsed as { abiMagic?: unknown; header?: unknown };
+    if (typeof obj.abiMagic === 'string' && obj.abiMagic !== B8G_ABI_MAGIC_V3) {
+      diffs.push({
+        gate: 'abi-golden',
+        target: 'abi-golden.json',
+        expected: B8G_ABI_MAGIC_V3,
+        actual: obj.abiMagic,
+        message: `ABI magic mismatch in abi-golden.json (expected ${B8G_ABI_MAGIC_V3}, got ${obj.abiMagic})`,
+      });
+      return false;
+    }
+    if (typeof obj.header === 'string' && obj.header.trim().length > 0) {
+      const headerRel = obj.header.trim();
+      if (!existsSync(resolve(cwd, headerRel))) {
+        diffs.push({
+          gate: 'abi-golden',
+          target: 'abi-golden.json',
+          expected: `existing header ${headerRel}`,
+          actual: 'missing',
+          message: `abi-golden.json references missing header "${headerRel}"`,
+        });
+        return false;
+      }
+    }
+    return true;
+  } catch (err) {
+    diffs.push({
+      gate: 'abi-golden',
+      target: 'abi-golden.json',
+      expected: 'valid JSON',
+      actual: 'parse error',
+      message: `Failed to parse abi-golden.json: ${err instanceof Error ? err.message : String(err)}`,
+    });
+    return false;
+  }
+}
+
+function verifySha512Gate(
+  cwd: string,
+  manifest: HoloCiManifest,
+  diffs: HoloCiShadowCanaryDiff[],
+): { ok: boolean; checked: number } {
+  const configuredSums = manifest.casRelease?.sumsPath;
+  const sumsRel = configuredSums ?? 'SHA512SUMS.txt';
+  const sumsFull = resolve(cwd, sumsRel);
+
+  if (!existsSync(sumsFull)) {
+    if (configuredSums) {
+      diffs.push({
+        gate: 'sha512',
+        target: sumsRel,
+        expected: 'existing SHA512SUMS file',
+        actual: 'missing',
+        message: `Configured sumsPath "${sumsRel}" does not exist`,
+      });
+      return { ok: false, checked: 0 };
+    }
+    return { ok: true, checked: 0 };
+  }
+
+  const lines = readFileSync(sumsFull, 'utf8')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !l.startsWith('#'));
+
+  let checked = 0;
+  let allOk = true;
+  for (const line of lines) {
+    const match = /^([0-9a-fA-F]{128})\s+\*?(.+)$/.exec(line);
+    if (!match) {
+      allOk = false;
+      diffs.push({
+        gate: 'sha512',
+        target: sumsRel,
+        expected: '<128-hex-sha512>  <path>',
+        actual: line,
+        message: `Malformed SHA-512 checksum entry in "${sumsRel}"`,
+      });
+      continue;
+    }
+
+    const expectedHash = match[1].toLowerCase();
+    const relTarget = match[2].trim();
+    const fullTarget = resolve(cwd, relTarget);
+    checked++;
+
+    if (!existsSync(fullTarget)) {
+      allOk = false;
+      diffs.push({
+        gate: 'sha512',
+        target: relTarget,
+        expected: expectedHash,
+        actual: 'missing',
+        message: `SHA-512 target "${relTarget}" listed in "${sumsRel}" does not exist`,
+      });
+      continue;
+    }
+
+    const actualHash = createHash('sha512').update(readFileSync(fullTarget)).digest('hex');
+    if (actualHash !== expectedHash) {
+      allOk = false;
+      diffs.push({
+        gate: 'sha512',
+        target: relTarget,
+        expected: expectedHash,
+        actual: actualHash,
+        message: `SHA-512 mismatch for "${relTarget}"`,
+      });
+    }
+  }
+
+  return { ok: allOk, checked };
+}
+
+export function runShadowCanaryGate(
+  manifest: HoloCiManifest,
+  options: { cwd?: string; configPath?: string } = {},
+): HoloCiShadowCanaryResult {
+  const cwd = options.cwd ?? process.cwd();
+  const diffs: HoloCiShadowCanaryDiff[] = [];
+
+  const verifyRes = runVerify(manifest, { cwd });
+  for (const t of verifyRes.tests) {
+    if (!t.ok) {
+      diffs.push({
+        gate: 'verify',
+        target: t.command,
+        expected: 'exitCode=0',
+        actual: `exitCode=${t.exitCode}`,
+        message: `Test command failed: ${t.command}`,
+      });
+    }
+  }
+  for (const g of verifyRes.nativeGates) {
+    if (!g.ok) {
+      diffs.push({
+        gate: 'verify',
+        target: g.command,
+        expected: 'exitCode=0',
+        actual: `exitCode=${g.exitCode}`,
+        message: `Native gate failed: ${g.command}`,
+      });
+    }
+  }
+  for (const d of verifyRes.docs) {
+    if (!d.exists) {
+      diffs.push({
+        gate: 'verify',
+        target: d.path,
+        expected: 'existing doc',
+        actual: 'missing',
+        message: `Required documentation missing: ${d.path}`,
+      });
+    }
+  }
+  for (const v of verifyRes.guardViolations) {
+    diffs.push({
+      gate: 'verify',
+      target: v.file,
+      expected: `guard(${v.guard}) clean`,
+      actual: v.snippet,
+      message: v.message,
+    });
+  }
+
+  const abiGoldenOk = verifyAbiGoldenGate(cwd, options.configPath, diffs);
+  const sha512Res = verifySha512Gate(cwd, manifest, diffs);
+  const ok = verifyRes.ok && abiGoldenOk && sha512Res.ok;
+
+  return {
+    enabled: true,
+    ok,
+    held: !ok,
+    verifyOk: verifyRes.ok,
+    abiGoldenOk,
+    sha512Ok: sha512Res.ok,
+    sha512Checked: sha512Res.checked,
+    diffs,
+  };
+}
+
 export async function runBumpAsync(
   manifest: HoloCiManifest,
   options: {
@@ -178,6 +403,7 @@ export async function runBumpAsync(
     dryRun?: boolean;
     fetchUpstream?: boolean;
     applyPins?: boolean;
+    shadowCanary?: boolean;
     configPath?: string;
     token?: string;
     fetchFn?: typeof fetch;
@@ -202,6 +428,24 @@ export async function runBumpAsync(
   const laggedNames = new Set(initialChecks.filter((p) => p.status === 'pinned-behind').map((p) => p.name));
   const bumpedPins = Array.from(laggedNames);
   const bumpedCount = bumpedPins.length;
+
+  let shadowCanary: HoloCiShadowCanaryResult | undefined;
+  if (options.shadowCanary) {
+    shadowCanary = runShadowCanaryGate(manifest, {
+      cwd,
+      configPath: options.configPath,
+    });
+    if (!shadowCanary.ok) {
+      return {
+        ok: false,
+        pins: initialChecks,
+        bumpedCount,
+        bumpedPins,
+        applied: false,
+        shadowCanary,
+      };
+    }
+  }
 
   let applied = false;
   if (options.applyPins && !options.dryRun && bumpedCount > 0) {
@@ -241,7 +485,7 @@ export async function runBumpAsync(
     packageBump = bumpPackageJson(pkgFull, options.version, Boolean(options.dryRun));
   }
 
-  const ok = pins.every((p) => p.ok);
+  const ok = pins.every((p) => p.ok) && (shadowCanary?.ok ?? true);
   return {
     ok,
     pins,
@@ -249,5 +493,6 @@ export async function runBumpAsync(
     bumpedCount,
     bumpedPins,
     applied,
+    ...(shadowCanary ? { shadowCanary } : {}),
   };
 }

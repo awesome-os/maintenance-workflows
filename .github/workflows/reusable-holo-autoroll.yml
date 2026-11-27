@@ -63,6 +63,7 @@ jobs:
           node .holo-ci-runtime/holo-ci/cli.mts bump \
             --fetch-upstream \
             --apply-pins \
+            --shadow-canary \
             --config "${{ inputs.config-path }}" \
             --emit-summary
           rm -rf .holo-ci-runtime
@@ -98,7 +99,7 @@ jobs:
             --description "Automated upstream pin roll" \
             --force >/dev/null 2>&1 || true
 
-          PR_BODY="$(printf 'Automated upstream pin roll via `holo-ci bump --fetch-upstream --apply-pins`.\n\nBug: %s\nVerified-By: holo-ci@v1\n' "${TRACKING_ISSUE}")"
+          PR_BODY="$(printf 'Automated upstream pin roll via `holo-ci bump --fetch-upstream --apply-pins --shadow-canary`.\n\nBug: %s\nVerified-By: holo-ci@v1\n' "${TRACKING_ISSUE}")"
 
           PR_URL="$(gh pr create \
             --base "${BASE_BRANCH}" \

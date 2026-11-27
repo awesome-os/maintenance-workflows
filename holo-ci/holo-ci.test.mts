@@ -709,6 +709,84 @@ describe('holo-ci bump', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('supports shadowCanary pass and auto-hold on failure before applyPins commits', async () => {
+    const dir = makeTempDir('holo-ci-shadow-canary-');
+    try {
+      mkdirSync(join(dir, 'include'), { recursive: true });
+      const readmeBuf = Buffer.from('# Shadow Canary\n', 'utf8');
+      const readmeHash = createHash('sha512').update(readmeBuf).digest('hex');
+      writeFileSync(join(dir, 'README.md'), readmeBuf);
+      writeFileSync(join(dir, 'include', 'abi.h'), '#define B8G_ABI_MAGIC_V3 0x33564742\n', 'utf8');
+      writeFileSync(
+        join(dir, 'abi-golden.json'),
+        JSON.stringify({ abiMagic: B8G_ABI_MAGIC_V3, header: 'include/abi.h' }),
+        'utf8',
+      );
+      writeFileSync(join(dir, 'SHA512SUMS.txt'), `${readmeHash}  README.md\n`, 'utf8');
+
+      const laggedManifest: HoloCiManifest = {
+        schema: HOLO_CI_SCHEMA,
+        name: 'shadow-canary-test',
+        kind: 'runtime',
+        docs: ['README.md'],
+        upstreamPins: [{ name: 'zlib', pinned: '1.3.0', upstream: '1.3.1' }],
+      };
+      writeFileSync(join(dir, 'holo-ci.json'), `${JSON.stringify(laggedManifest, null, 2)}\n`, 'utf8');
+
+      // 1. Canary passes -> pins are applied
+      const passRes = await runBumpAsync(laggedManifest, {
+        cwd: dir,
+        applyPins: true,
+        shadowCanary: true,
+      });
+      assert.equal(passRes.ok, true);
+      assert.equal(passRes.applied, true);
+      assert.equal(passRes.shadowCanary?.enabled, true);
+      assert.equal(passRes.shadowCanary?.ok, true);
+      assert.equal(passRes.shadowCanary?.held, false);
+      assert.equal(passRes.shadowCanary?.verifyOk, true);
+      assert.equal(passRes.shadowCanary?.abiGoldenOk, true);
+      assert.equal(passRes.shadowCanary?.sha512Ok, true);
+      assert.equal(passRes.shadowCanary?.sha512Checked, 1);
+      assert.equal(passRes.shadowCanary?.diffs.length, 0);
+
+      // 2. Reset pin to lagged and corrupt abi-golden.json + SHA512SUMS.txt -> bump is HELD
+      writeFileSync(join(dir, 'holo-ci.json'), `${JSON.stringify(laggedManifest, null, 2)}\n`, 'utf8');
+      writeFileSync(
+        join(dir, 'abi-golden.json'),
+        JSON.stringify({ abiMagic: '0x00000000', header: 'include/abi.h' }),
+        'utf8',
+      );
+      writeFileSync(join(dir, 'SHA512SUMS.txt'), `${'0'.repeat(128)}  README.md\n`, 'utf8');
+
+      const holdRes = await runBumpAsync(laggedManifest, {
+        cwd: dir,
+        applyPins: true,
+        shadowCanary: true,
+      });
+      assert.equal(holdRes.ok, false);
+      assert.equal(holdRes.applied, false);
+      assert.equal(holdRes.shadowCanary?.ok, false);
+      assert.equal(holdRes.shadowCanary?.held, true);
+      assert.equal(holdRes.shadowCanary?.abiGoldenOk, false);
+      assert.equal(holdRes.shadowCanary?.sha512Ok, false);
+      assert.equal(
+        holdRes.shadowCanary?.diffs.some((d) => d.gate === 'abi-golden'),
+        true,
+      );
+      assert.equal(
+        holdRes.shadowCanary?.diffs.some((d) => d.gate === 'sha512' && d.target === 'README.md'),
+        true,
+      );
+
+      // Ensure holo-ci.json pin was NOT modified when canary held the bump
+      const stillHeld = JSON.parse(readFileSync(join(dir, 'holo-ci.json'), 'utf8')) as HoloCiManifest;
+      assert.equal(stillHeld.upstreamPins?.[0].pinned, '1.3.0');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('holo-ci pack', () => {
@@ -1659,6 +1737,72 @@ describe('holo-ci CLI', () => {
         existsSync(join(dir, 'cas-out', 'v11', 'files', expectedSha512.slice(0, 2), expectedSha512)),
         true,
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('executes bump --apply-pins --shadow-canary via CLI and holds on canary failure', () => {
+    const cliPath = resolve(import.meta.dirname, 'cli.mts');
+    const dir = makeTempDir('holo-ci-cli-shadow-canary-');
+    try {
+      const docBuf = Buffer.from('# CLI Canary\n', 'utf8');
+      const docHash = createHash('sha512').update(docBuf).digest('hex');
+      writeFileSync(join(dir, 'README.md'), docBuf);
+      writeFileSync(join(dir, 'SHA512SUMS.txt'), `${'f'.repeat(128)}  README.md\n`, 'utf8');
+      writeFileSync(
+        join(dir, 'holo-ci.json'),
+        JSON.stringify(
+          {
+            schema: HOLO_CI_SCHEMA,
+            name: 'cli-shadow-canary',
+            kind: 'control-plane',
+            docs: ['README.md'],
+            upstreamPins: [{ name: 'zlib', pinned: '1.3.0', upstream: '1.3.1' }],
+          },
+          null,
+          2,
+        ),
+        'utf8',
+      );
+
+      const failRes = spawnSync(
+        process.execPath,
+        [cliPath, 'bump', '--cwd', dir, '--apply-pins', '--shadow-canary', '--json'],
+        { encoding: 'utf8' },
+      );
+      assert.equal(failRes.status, 1, failRes.stderr);
+      const failReceipt = JSON.parse(failRes.stdout) as {
+        ok: boolean;
+        bump?: {
+          applied?: boolean;
+          shadowCanary?: { held?: boolean; sha512Ok?: boolean };
+        };
+      };
+      assert.equal(failReceipt.ok, false);
+      assert.equal(failReceipt.bump?.applied, false);
+      assert.equal(failReceipt.bump?.shadowCanary?.held, true);
+      assert.equal(failReceipt.bump?.shadowCanary?.sha512Ok, false);
+
+      // Fix SHA512SUMS.txt and re-run -> passes and applies pin
+      writeFileSync(join(dir, 'SHA512SUMS.txt'), `${docHash}  README.md\n`, 'utf8');
+      const passRes = spawnSync(
+        process.execPath,
+        [cliPath, 'bump', '--cwd', dir, '--apply-pins', '--shadow-canary', '--json'],
+        { encoding: 'utf8' },
+      );
+      assert.equal(passRes.status, 0, passRes.stderr);
+      const passReceipt = JSON.parse(passRes.stdout) as {
+        ok: boolean;
+        bump?: {
+          applied?: boolean;
+          shadowCanary?: { held?: boolean; ok?: boolean };
+        };
+      };
+      assert.equal(passReceipt.ok, true);
+      assert.equal(passReceipt.bump?.applied, true);
+      assert.equal(passReceipt.bump?.shadowCanary?.held, false);
+      assert.equal(passReceipt.bump?.shadowCanary?.ok, true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
