@@ -8,7 +8,7 @@ import {
 } from './audit-stack.mts';
 import { runBoundaryAudit } from './boundary.mts';
 import { runBumpAsync } from './bump.mts';
-import { collectFleetForensics } from './fleet-forensics.mts';
+import { collectFleetForensics, type FleetForensicsGateMode } from './fleet-forensics.mts';
 import { runLockCompat, tryLoadHoloPmLockfileHelper } from './lock-compat.mts';
 import { runMaintain } from './maintain.mts';
 import { runPack } from './pack.mts';
@@ -47,6 +47,7 @@ export interface ParsedCliArgs {
   repos?: string[];
   hours?: number;
   slowSec?: number;
+  gate?: FleetForensicsGateMode;
   fetchUpstream: boolean;
   applyPins: boolean;
   shadowCanary: boolean;
@@ -145,6 +146,7 @@ export function getHelpText(): string {
     '  --repos <a,b>          Comma-separated repo names for `fleet-forensics`',
     '  --hours <n>            Lookback window in hours for `fleet-forensics` (default: 4)',
     '  --slow-sec <n>         Slow job threshold in seconds for `fleet-forensics` (default: 300)',
+    '  --gate <mode>          Exit-code gate for `fleet-forensics`: none|latest|window (default: window)',
     '  --repo <name>          Repository identifier for `audit-stack` (default: manifest name or cwd basename)',
     '  --mode <mode>          Execution mode for `audit-stack`: fail-fast|exhaust (default: fail-fast)',
     '  --telemetry-out <path> Append holo-rule-violation.v1 JSONL telemetry during `audit-stack`',
@@ -186,6 +188,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
   let repos: string[] | undefined;
   let hours: number | undefined;
   let slowSec: number | undefined;
+  let gate: FleetForensicsGateMode | undefined;
   let fetchUpstream = false;
   let applyPins = false;
   let shadowCanary = false;
@@ -256,6 +259,12 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
         throw new Error(`Invalid --slow-sec "${rawSlow}" (expected positive number)`);
       }
       slowSec = parsedSlow;
+    } else if (arg === '--gate' && argv[i + 1]) {
+      const rawGate = argv[++i].trim();
+      if (rawGate !== 'none' && rawGate !== 'latest' && rawGate !== 'window') {
+        throw new Error(`Invalid --gate "${rawGate}" (expected "none", "latest", or "window")`);
+      }
+      gate = rawGate;
     } else if (arg === '--timeout-minutes' && argv[i + 1]) {
       const rawTimeout = argv[++i];
       const parsedTimeout = Number(rawTimeout);
@@ -362,6 +371,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     ...(repos ? { repos } : {}),
     ...(hours !== undefined ? { hours } : {}),
     ...(slowSec !== undefined ? { slowSec } : {}),
+    ...(gate ? { gate } : {}),
     fetchUpstream,
     applyPins,
     shadowCanary,
@@ -538,6 +548,7 @@ export async function executeCli(argv: string[]): Promise<{ exitCode: number; re
       hours: opts.hours,
       slowThresholdSec: opts.slowSec,
       concurrency: opts.concurrency,
+      gate: opts.gate,
     });
     const configFullPath = resolve(opts.cwd, opts.configPath);
     const manifest: HoloCiManifest = existsSync(configFullPath)

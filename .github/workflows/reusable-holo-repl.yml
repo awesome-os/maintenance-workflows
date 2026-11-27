@@ -1,0 +1,81 @@
+name: Reusable Holo-REPL Sandbox (v1)
+
+on:
+  workflow_call:
+    inputs:
+      command:
+        description: 'Ephemeral REPL or sandbox command to execute on ubuntu-latest'
+        required: true
+        type: string
+      node-version:
+        description: 'Node.js version for the ephemeral REPL runner'
+        required: false
+        default: '26'
+        type: string
+      cas-hydrate:
+        description: 'Whether to run zero-copy CAS v11 lock-compat hydration check before executing'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  holo-repl:
+    name: Holo-REPL Ephemeral Sandbox
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Hydrate CAS v11 lock-compat (optional)
+        if: ${{ inputs.cas-hydrate }}
+        uses: actions/checkout@v7
+        with:
+          repository: awesome-os/maintenance-workflows
+          ref: v1
+          path: .holo-ci-runtime
+
+      - name: Run CAS v11 lock-compat check
+        if: ${{ inputs.cas-hydrate }}
+        shell: bash
+        run: node .holo-ci-runtime/holo-ci/cli.mts lock-compat --ecosystem npm --dry-run --json
+
+      - name: Execute ephemeral sandbox REPL command
+        id: repl
+        shell: bash
+        env:
+          HOLO_REPL_COMMAND: ${{ inputs.command }}
+        run: |
+          set -euo pipefail
+          bash -euo pipefail -c "$HOLO_REPL_COMMAND"
+
+      - name: Emit Holo-REPL step summary
+        if: always()
+        shell: bash
+        env:
+          HOLO_REPL_COMMAND: ${{ inputs.command }}
+          HOLO_REPL_NODE: ${{ inputs.node-version }}
+          HOLO_REPL_CAS_HYDRATE: ${{ inputs.cas-hydrate }}
+          HOLO_REPL_OUTCOME: ${{ steps.repl.outcome }}
+        run: |
+          {
+            echo "## Holo-REPL Ephemeral Sandbox"
+            echo ""
+            echo "| Field | Value |"
+            echo "| :--- | :--- |"
+            echo "| Runner | \`ubuntu-latest\` |"
+            echo "| Node.js | \`${HOLO_REPL_NODE}\` |"
+            echo "| CAS Hydrate | \`${HOLO_REPL_CAS_HYDRATE}\` |"
+            echo "| Outcome | \`${HOLO_REPL_OUTCOME}\` |"
+            echo "| Command | \`${HOLO_REPL_COMMAND}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

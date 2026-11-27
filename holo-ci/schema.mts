@@ -10,7 +10,7 @@ export const HOLO_CI_RECEIPT_SCHEMA = 'holo-ci.receipt.v1' as const;
 export const HOLO_V11_MANIFEST_SCHEMA = 'holo-v11.manifest.v1' as const;
 export const HOLO_BOUNDARY_SCHEMA = 'holo-boundary.v1' as const;
 export const HOLO_RULE_VIOLATION_SCHEMA = 'holo-rule-violation.v1' as const;
-export const HOLO_LOCKFILE_VERSION = 2 as const;
+export const HOLO_LOCKFILE_VERSION = 3 as const;
 export const B8G_ABI_MAGIC_V3 = '0x33564742' as const;
 
 export type HoloRuleSeverity = 'error' | 'warning' | 'info';
@@ -328,6 +328,7 @@ export interface HoloCiLockCompatArtifact {
   bytes: number;
   sha256: string;
   written: boolean;
+  migrationsApplied?: string[];
 }
 
 export interface HoloCiLockCompatResult {
@@ -348,6 +349,7 @@ export interface HoloCiLockCompatResult {
   resolvedFromPnpmLock: number;
   resolvedFromMaxLock: number;
   sha256: string;
+  migrationsApplied?: string[];
   artifacts: HoloCiLockCompatArtifact[];
   lockfile?: HoloCiLockfileV3;
 }

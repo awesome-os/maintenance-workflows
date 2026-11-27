@@ -1613,7 +1613,7 @@ describe('holo-ci CLI', () => {
     }
   });
 
-  it('enforces lockfileVersion 0 -> 2 upgrade and > 2 downgrade guard via holo-pm helper & fallback', async () => {
+  it('enforces lockfileVersion 0 -> 3 upgrade with migrationsApplied and > 3 downgrade guard via holo-pm helper & fallback', async () => {
     const dir = makeTempDir('holo-ci-lockfile-ver-');
     try {
       const helper = await tryLoadHoloPmLockfileHelper(dir);
@@ -1623,7 +1623,7 @@ describe('holo-ci CLI', () => {
       const lockPath = join(dir, 'holo-compiler-lockfile.json');
       assert.equal(readLockfileVersion(lockPath), 0);
 
-      // Unversioned existing file -> readLockfileVersion returns 0 -> upgraded to 2
+      // Unversioned existing file -> readLockfileVersion returns 0 -> upgraded to 3
       writeFileSync(lockPath, JSON.stringify({ name: 'unversioned', packages: {} }), 'utf8');
       assert.equal(readLockfileVersion(lockPath), 0);
 
@@ -1636,12 +1636,13 @@ describe('holo-ci CLI', () => {
       assert.equal(upgraded.action, 'upgraded');
       assert.equal(upgraded.existingVersion, 0);
       assert.equal(upgraded.resultingVersion, HOLO_LOCKFILE_VERSION);
+      assert.deepEqual(upgraded.migrationsApplied, ['v0->v1', 'v1->v2', 'v2->v3']);
       assert.equal(readLockfileVersion(lockPath), HOLO_LOCKFILE_VERSION);
 
-      // Higher existing version (> 2) -> downgrade guard keeps existing file untouched
-      const higherPayload = `${JSON.stringify({ name: 'future', lockfileVersion: 3, packages: { keep: true } }, null, 2)}\n`;
+      // Higher existing version (> 3) -> downgrade guard keeps existing file untouched
+      const higherPayload = `${JSON.stringify({ name: 'future', lockfileVersion: 4, packages: { keep: true } }, null, 2)}\n`;
       writeFileSync(lockPath, higherPayload, 'utf8');
-      assert.equal(readLockfileVersion(lockPath), 3);
+      assert.equal(readLockfileVersion(lockPath), 4);
 
       const guarded = writeOrUpgradeLockfile(
         lockPath,
@@ -1650,11 +1651,12 @@ describe('holo-ci CLI', () => {
       );
       assert.equal(guarded.written, false);
       assert.equal(guarded.action, 'kept-higher');
-      assert.equal(guarded.existingVersion, 3);
-      assert.equal(guarded.resultingVersion, 3);
+      assert.equal(guarded.existingVersion, 4);
+      assert.equal(guarded.resultingVersion, 4);
+      assert.deepEqual(guarded.migrationsApplied, []);
       assert.equal(readFileSync(lockPath, 'utf8'), higherPayload);
 
-      // runLockCompat upgrades unversioned package-lock.json (0 -> 2) and refuses to downgrade lockfileVersion > 2
+      // runLockCompat upgrades unversioned package-lock.json (0 -> 3) and refuses to downgrade lockfileVersion > 3
       writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'ver-test', version: '1.0.0' }), 'utf8');
       const pkgLockPath = join(dir, 'package-lock.json');
       writeFileSync(pkgLockPath, JSON.stringify({ name: 'old-unversioned' }), 'utf8');
@@ -1663,6 +1665,7 @@ describe('holo-ci CLI', () => {
       assert.equal(upgradeRes.ok, true);
       assert.equal(upgradeRes.lockfileVersion, HOLO_LOCKFILE_VERSION);
       assert.equal(upgradeRes.artifacts[0].written, true);
+      assert.deepEqual(upgradeRes.migrationsApplied, ['v0->v1', 'v1->v2', 'v2->v3']);
       assert.equal(readLockfileVersion(pkgLockPath), HOLO_LOCKFILE_VERSION);
 
       const futurePkgLock = `${JSON.stringify({ name: 'future-lock', lockfileVersion: 4, packages: {} }, null, 2)}\n`;
@@ -1670,6 +1673,7 @@ describe('holo-ci CLI', () => {
       const guardRes = runLockCompat({ cwd: dir, ecosystem: 'npm' });
       assert.equal(guardRes.ok, true);
       assert.equal(guardRes.artifacts[0].written, false);
+      assert.deepEqual(guardRes.migrationsApplied, []);
       assert.equal(readFileSync(pkgLockPath, 'utf8'), futurePkgLock);
     } finally {
       rmSync(dir, { recursive: true, force: true });

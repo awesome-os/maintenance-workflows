@@ -71,12 +71,17 @@ export interface FleetForensicsSlowJobEntry {
   readonly durationSec: number;
 }
 
+export type FleetForensicsGateMode = 'none' | 'latest' | 'window';
+
+export const DEFAULT_FORENSICS_GATE: FleetForensicsGateMode = 'window';
+
 export interface CollectFleetForensicsOptions {
   readonly owner?: string;
   readonly repos?: readonly string[];
   readonly hours?: number;
   readonly slowThresholdSec?: number;
   readonly concurrency?: number;
+  readonly gate?: FleetForensicsGateMode;
   readonly nowMs?: number;
   readonly client?: GithubClient;
 }
@@ -88,6 +93,7 @@ export interface FleetForensicsReport {
   readonly owner: string;
   readonly hours: number;
   readonly slowThresholdSec: number;
+  readonly gate: FleetForensicsGateMode;
   readonly ok: boolean;
   readonly reposScanned: number;
   readonly greenOnLatest: number;
@@ -389,6 +395,14 @@ export async function collectFleetForensics(
   cancelledRuns.sort((a, b) => a.repo.localeCompare(b.repo) || b.runId - a.runId);
   slowJobs.sort((a, b) => b.durationSec - a.durationSec || a.repo.localeCompare(b.repo));
 
+  const gate: FleetForensicsGateMode = options.gate ?? DEFAULT_FORENSICS_GATE;
+  const ok =
+    gate === 'none'
+      ? true
+      : gate === 'latest'
+        ? greenOnLatest >= repoNames.length && errors.length === 0
+        : failedRuns.length === 0 && errors.length === 0;
+
   return {
     schema: FLEET_FORENSICS_SCHEMA,
     abiMagic: B8G_ABI_MAGIC_V3,
@@ -396,7 +410,8 @@ export async function collectFleetForensics(
     owner,
     hours,
     slowThresholdSec,
-    ok: failedRuns.length === 0 && errors.length === 0,
+    gate,
+    ok,
     reposScanned: repoNames.length,
     greenOnLatest,
     failedRuns,
@@ -499,6 +514,7 @@ export interface ParsedFleetForensicsCliArgs {
   readonly hours: number;
   readonly slowThresholdSec: number;
   readonly concurrency?: number;
+  readonly gate: FleetForensicsGateMode;
   readonly json: boolean;
   readonly help: boolean;
 }
@@ -508,7 +524,7 @@ export function getFleetForensicsHelpText(): string {
     'fleet-forensics — Single-process GitHub Actions fleet forensics scanner',
     '',
     'Usage:',
-    '  node holo-ci/fleet-forensics.mts [--owner <org>] [--repos <a,b>] [--hours <n>] [--slow-sec <n>] [--json]',
+    '  node holo-ci/fleet-forensics.mts [--owner <org>] [--repos <a,b>] [--hours <n>] [--slow-sec <n>] [--gate <none|latest|window>] [--json]',
     '',
     'Options:',
     `  --owner <org>       GitHub organization/owner (default: ${DEFAULT_FORENSICS_OWNER})`,
@@ -516,6 +532,7 @@ export function getFleetForensicsHelpText(): string {
     `  --hours <n>         Lookback window in hours (default: ${DEFAULT_FORENSICS_HOURS})`,
     `  --slow-sec <n>      Slow job duration threshold in seconds (default: ${DEFAULT_SLOW_THRESHOLD_SEC})`,
     `  --concurrency <n>   Max concurrent repo scans (default: ${DEFAULT_FORENSICS_CONCURRENCY})`,
+    `  --gate <mode>       Exit-code gate: none|latest|window (default: ${DEFAULT_FORENSICS_GATE})`,
     '  --json              Emit structured b8g.fleet-forensics.v1 JSON to stdout',
     '  -h, --help          Show this help message',
     '',
@@ -528,6 +545,7 @@ export function parseFleetForensicsCliArgs(argv: readonly string[]): ParsedFleet
   let hours = DEFAULT_FORENSICS_HOURS;
   let slowThresholdSec = DEFAULT_SLOW_THRESHOLD_SEC;
   let concurrency: number | undefined;
+  let gate: FleetForensicsGateMode = DEFAULT_FORENSICS_GATE;
   let json = false;
   let help = false;
 
@@ -562,6 +580,12 @@ export function parseFleetForensicsCliArgs(argv: readonly string[]): ParsedFleet
         throw new Error(`Invalid --concurrency value: "${argv[i]}"`);
       }
       concurrency = parsed;
+    } else if (arg === '--gate' && i + 1 < argv.length) {
+      const rawGate = argv[++i]!.trim();
+      if (rawGate !== 'none' && rawGate !== 'latest' && rawGate !== 'window') {
+        throw new Error(`Invalid --gate value: "${rawGate}" (expected "none", "latest", or "window")`);
+      }
+      gate = rawGate;
     } else {
       throw new Error(`Unknown or incomplete argument: "${arg}"`);
     }
@@ -573,6 +597,7 @@ export function parseFleetForensicsCliArgs(argv: readonly string[]): ParsedFleet
     hours,
     slowThresholdSec,
     ...(concurrency !== undefined ? { concurrency } : {}),
+    gate,
     json,
     help,
   };
@@ -594,6 +619,7 @@ export async function runFleetForensicsCli(
     hours: opts.hours,
     slowThresholdSec: opts.slowThresholdSec,
     concurrency: opts.concurrency,
+    gate: opts.gate,
     client,
   });
 

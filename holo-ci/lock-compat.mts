@@ -18,6 +18,22 @@ export interface HoloPmLockfileWriteResult {
   readonly action: 'created' | 'upgraded' | 'kept-higher' | 'updated';
   readonly existingVersion: number;
   readonly resultingVersion: number;
+  readonly migrationsApplied: readonly string[];
+}
+
+export function computeLockfileMigrations(
+  action: HoloPmLockfileWriteResult['action'],
+  existingVersion: number,
+  resultingVersion: number,
+): string[] {
+  if (action !== 'upgraded' || existingVersion >= resultingVersion) {
+    return [];
+  }
+  const migrations: string[] = [];
+  for (let v = existingVersion; v < resultingVersion; v++) {
+    migrations.push(`v${v}->v${v + 1}`);
+  }
+  return migrations;
 }
 
 export interface HoloPmLockfileHelper {
@@ -63,6 +79,7 @@ export function writeOrUpgradeLockfile(
       action: 'kept-higher',
       existingVersion,
       resultingVersion: existingVersion,
+      migrationsApplied: [],
     };
   }
 
@@ -80,6 +97,7 @@ export function writeOrUpgradeLockfile(
     action,
     existingVersion,
     resultingVersion: nextVersion,
+    migrationsApplied: computeLockfileMigrations(action, existingVersion, nextVersion),
   };
 }
 
@@ -112,10 +130,20 @@ export async function tryLoadHoloPmLockfileHelper(cwd: string): Promise<HoloPmLo
         writeOrUpgradeLockfile?: HoloPmLockfileHelper['writeOrUpgradeLockfile'];
       };
       if (typeof mod.readLockfileVersion === 'function' && typeof mod.writeOrUpgradeLockfile === 'function') {
+        const rawWriteOrUpgrade = mod.writeOrUpgradeLockfile;
         const helper: HoloPmLockfileHelper = {
           source: 'holo-pm',
           readLockfileVersion: mod.readLockfileVersion,
-          writeOrUpgradeLockfile: mod.writeOrUpgradeLockfile,
+          writeOrUpgradeLockfile: (filePath, content, nextVersion = HOLO_LOCKFILE_VERSION) => {
+            const res = rawWriteOrUpgrade(filePath, content, nextVersion);
+            const migrationsApplied = Array.isArray(res.migrationsApplied)
+              ? res.migrationsApplied
+              : computeLockfileMigrations(res.action, res.existingVersion, res.resultingVersion);
+            return {
+              ...res,
+              migrationsApplied,
+            };
+          },
         };
         cachedHoloPmHelper = helper;
         return helper;
@@ -656,11 +684,15 @@ function emitProjectionFile(
   lockfileVersion?: number,
 ): HoloCiLockCompatArtifact {
   let written = !dryRun;
+  let migrationsApplied: string[] | undefined;
   if (!dryRun) {
     if (lockfileVersion !== undefined) {
       const helper = cachedHoloPmHelper ?? INLINE_LOCKFILE_HELPER;
       const writeRes = helper.writeOrUpgradeLockfile(targetPath, content, lockfileVersion);
       written = writeRes.written;
+      if (writeRes.migrationsApplied.length > 0) {
+        migrationsApplied = [...writeRes.migrationsApplied];
+      }
     } else {
       mkdirSync(dirname(targetPath), { recursive: true });
       writeFileSync(targetPath, content, 'utf8');
@@ -674,6 +706,7 @@ function emitProjectionFile(
     bytes: Buffer.byteLength(content, 'utf8'),
     sha256: sha256Text(content),
     written,
+    ...(migrationsApplied ? { migrationsApplied } : {}),
   };
   artifacts.push(artifact);
   return artifact;
@@ -1895,6 +1928,10 @@ export function runLockCompat(opts: LockCompatOptions = {}): HoloCiLockCompatRes
   const overallSha256 =
     ecosystem === 'npm' && artifacts.length === 1 ? artifacts[0].sha256 : sha256Text(compositeDigestInput);
 
+  const migrationsApplied = Array.from(
+    new Set(artifacts.flatMap((a) => a.migrationsApplied ?? [])),
+  );
+
   return {
     ok: true,
     ecosystem,
@@ -1913,6 +1950,7 @@ export function runLockCompat(opts: LockCompatOptions = {}): HoloCiLockCompatRes
     resolvedFromPnpmLock,
     resolvedFromMaxLock,
     sha256: overallSha256,
+    migrationsApplied,
     artifacts,
     ...(npmLockfile ? { lockfile: npmLockfile } : {}),
   };

@@ -247,6 +247,91 @@ describe('holo-ci/fleet-forensics single-process scanner', () => {
       process.stdout.write = originalWrite;
     }
   });
+
+  it('supports --gate none|latest|window for superseded failures vs green-on-latest', async () => {
+    const nowMs = Date.parse('2026-06-15T12:00:00.000Z');
+    const mockClient = createGithubClient({
+      token: 'test-token',
+      allowCliTokenFallback: false,
+      fetchImpl: async (url) => {
+        if (url.includes('/actions/runs?')) {
+          return jsonResponse({
+            workflow_runs: [
+              // Latest run on main is green, but an earlier run in the window failed
+              {
+                id: 302,
+                workflow_id: 1,
+                name: 'CI',
+                status: 'completed',
+                conclusion: 'success',
+                head_branch: 'main',
+                event: 'push',
+                created_at: '2026-06-15T11:30:00.000Z',
+                run_started_at: '2026-06-15T11:30:05.000Z',
+                updated_at: '2026-06-15T11:31:00.000Z',
+              },
+              {
+                id: 301,
+                workflow_id: 1,
+                name: 'CI',
+                status: 'completed',
+                conclusion: 'failure',
+                head_branch: 'main',
+                event: 'push',
+                created_at: '2026-06-15T10:30:00.000Z',
+                run_started_at: '2026-06-15T10:30:05.000Z',
+                updated_at: '2026-06-15T10:31:00.000Z',
+              },
+            ],
+          });
+        }
+        return jsonResponse({ jobs: [] });
+      },
+      sleepImpl: async () => {},
+    });
+
+    const windowReport = await collectFleetForensics({
+      owner: 'awesome-os',
+      repos: ['healed-repo'],
+      hours: 4,
+      nowMs,
+      client: mockClient,
+      gate: 'window',
+    });
+    assert.equal(windowReport.gate, 'window');
+    assert.equal(windowReport.greenOnLatest, 1);
+    assert.equal(windowReport.failedRuns.length, 1);
+    assert.equal(windowReport.ok, false);
+
+    const latestReport = await collectFleetForensics({
+      owner: 'awesome-os',
+      repos: ['healed-repo'],
+      hours: 4,
+      nowMs,
+      client: mockClient,
+      gate: 'latest',
+    });
+    assert.equal(latestReport.gate, 'latest');
+    assert.equal(latestReport.greenOnLatest, 1);
+    assert.equal(latestReport.reposScanned, 1);
+    assert.equal(latestReport.ok, true);
+
+    const noneReport = await collectFleetForensics({
+      owner: 'awesome-os',
+      repos: ['healed-repo'],
+      hours: 4,
+      nowMs,
+      client: mockClient,
+      gate: 'none',
+    });
+    assert.equal(noneReport.gate, 'none');
+    assert.equal(noneReport.ok, true);
+
+    const cliParsed = parseCliArgs(['fleet-forensics', '--gate', 'latest', '--json']);
+    assert.equal(cliParsed.gate, 'latest');
+    const standaloneParsed = parseFleetForensicsCliArgs(['--gate', 'none']);
+    assert.equal(standaloneParsed.gate, 'none');
+  });
 });
 
 describe('holo-ci/telemetry structured violation tables for GITHUB_STEP_SUMMARY', () => {
