@@ -27,6 +27,8 @@ export interface HoloCiGuards {
   gitattributes?: boolean;
   codeowners?: boolean;
   noBrokenBadges?: boolean;
+  noWorkflowBloat?: boolean;
+  maxWorkflowLines?: number;
 }
 
 export interface HoloCiSyncPair {
@@ -98,7 +100,8 @@ export interface HoloCiGuardViolation {
     | 'spdxLicense'
     | 'gitattributes'
     | 'codeowners'
-    | 'noBrokenBadges';
+    | 'noBrokenBadges'
+    | 'noWorkflowBloat';
   file: string;
   line: number;
   snippet: string;

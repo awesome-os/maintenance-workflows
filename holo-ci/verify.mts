@@ -18,6 +18,11 @@ const GHOST_REGEX = new RegExp(`\\b${GHOST_TOKEN}\\b`, 'i');
 const CAS_V1_REGEX = new RegExp(`\\b${CAS_V1_TOKEN}(?![0-9])\\b`, 'i');
 const HTTP_IPC_REGEX = new RegExp(`${LOCALHOST_HTTP_PREFIX}(?:127\\.0\\.0\\.1|localhost)(?::\\d+)?`, 'i');
 const BROKEN_SHIELDS_BADGE_REGEX = /https:\/\/img\.shields\.io\/badge\/[^\s)\]"'<>?]*%2F/i;
+const DEFAULT_MAX_WORKFLOW_LINES = 140;
+const RUN_KEY_REGEX = /^(\s*(?:-\s+)?)run\s*:\s*(.*)$/;
+const EVAL_CMD_SUB_REGEX = /\beval\s+(?:["'][^"']*)?\$\(/;
+const UNTRUSTED_GH_CONTEXT_REGEX =
+  /\$\{\{[^}]*\bgithub\.(?:head_ref|event\.(?:issue|pull_request\.(?:title|body|head\.ref|head\.label)|comment|review|review_comment|discussion)\b)[^}]*\}\}/;
 
 export function runShellCommand(
   command: string,
@@ -82,7 +87,11 @@ function isAllowlistedGuardLine(lineText: string, relPath: string): boolean {
 
   // Exclude guard configuration keys in JSON manifests
   if (relPath.endsWith('holo-ci.json') || relPath.endsWith('package.json')) {
-    if (/^\s*"(zeroGhost|zeroCasV1|zeroHttpIpc|spdxLicense|gitattributes|codeowners|noBrokenBadges)"\s*:/.test(lineText)) {
+    if (
+      /^\s*"(zeroGhost|zeroCasV1|zeroHttpIpc|spdxLicense|gitattributes|codeowners|noBrokenBadges|noWorkflowBloat|maxWorkflowLines)"\s*:/.test(
+        lineText,
+      )
+    ) {
       return true;
     }
   }
@@ -240,6 +249,87 @@ export function scanGuardViolations(
             line: i + 1,
             snippet: lineText.trim().slice(0, 160),
           });
+        }
+      }
+    }
+  }
+
+  if (guards.noWorkflowBloat) {
+    const maxLines =
+      typeof guards.maxWorkflowLines === 'number' && guards.maxWorkflowLines > 0
+        ? guards.maxWorkflowLines
+        : DEFAULT_MAX_WORKFLOW_LINES;
+    const workflowFiles = files.filter((f) =>
+      relative(cwd, f).replace(/\\/g, '/').startsWith('.github/workflows/'),
+    );
+    for (const wfPath of workflowFiles) {
+      const relPath = relative(cwd, wfPath).replace(/\\/g, '/');
+      const content = readFileSync(wfPath, 'utf8');
+      const lines = content.length === 0 ? [] : content.replace(/\r?\n$/, '').split(/\r?\n/);
+
+      if (lines.length > maxLines) {
+        violations.push({
+          guard: 'noWorkflowBloat',
+          file: relPath,
+          line: lines.length,
+          snippet: `Workflow file has ${lines.length} lines (max ${maxLines})`,
+        });
+      }
+
+      let inRunBlock = false;
+      let runKeyIndent = -1;
+      let runBlockIndent = -1;
+
+      const checkRunLine = (lineText: string, lineNumber: number): void => {
+        if (isAllowlistedGuardLine(lineText, relPath)) return;
+        if (EVAL_CMD_SUB_REGEX.test(lineText)) {
+          violations.push({
+            guard: 'noWorkflowBloat',
+            file: relPath,
+            line: lineNumber,
+            snippet: lineText.trim().slice(0, 160),
+          });
+        }
+        if (UNTRUSTED_GH_CONTEXT_REGEX.test(lineText)) {
+          violations.push({
+            guard: 'noWorkflowBloat',
+            file: relPath,
+            line: lineNumber,
+            snippet: lineText.trim().slice(0, 160),
+          });
+        }
+      };
+
+      for (let i = 0; i < lines.length; i++) {
+        const lineText = lines[i];
+        const trimmed = lineText.trim();
+
+        if (inRunBlock) {
+          if (trimmed.length === 0) continue;
+          const indent = lineText.length - lineText.trimStart().length;
+          if (indent <= runKeyIndent || (runBlockIndent !== -1 && indent < runBlockIndent)) {
+            inRunBlock = false;
+            runKeyIndent = -1;
+            runBlockIndent = -1;
+          } else {
+            if (runBlockIndent === -1) runBlockIndent = indent;
+            checkRunLine(lineText, i + 1);
+            continue;
+          }
+        }
+
+        const runMatch = RUN_KEY_REGEX.exec(lineText);
+        if (runMatch) {
+          const keyIndent = lineText.length - lineText.trimStart().length;
+          const rest = runMatch[2].trim();
+          const isBlockScalar = /^[|>][+-]?(?:\s+#.*)?$/.test(rest);
+          if (isBlockScalar) {
+            inRunBlock = true;
+            runKeyIndent = keyIndent;
+            runBlockIndent = -1;
+          } else {
+            checkRunLine(rest, i + 1);
+          }
         }
       }
     }

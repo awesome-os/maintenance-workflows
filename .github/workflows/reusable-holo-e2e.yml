@@ -61,152 +61,36 @@ jobs:
           ref: ${{ inputs.holo-ci-ref }}
           path: .holo-ci-runtime
 
+      - name: Setup Node.js 26
+        uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+
       - name: Resolve sovereign holo-e2e-runner image
         id: resolve-image
         shell: bash
-        run: |
-          set -euo pipefail
-          TARGET_IMAGE="${{ inputs.runner-image }}"
-          RUNNER_TIER="${{ inputs.runner-tier }}"
-          FALLBACK_TARBALL="holo-e2e-runner-linux-amd64.oci.tar.gz"
-          FALLBACK_SUMS="SHA512SUMS-holo-e2e-runner.txt"
-          DEFAULT_IMAGE="ghcr.io/awesome-os/holo-e2e-runner:latest"
-
-          if [ "$RUNNER_TIER" = "lite" ]; then
-            DEFAULT_IMAGE="ghcr.io/awesome-os/holo-e2e-lite:latest"
-            if [ "$TARGET_IMAGE" = "ghcr.io/awesome-os/holo-e2e-runner:latest" ]; then
-              TARGET_IMAGE="ghcr.io/awesome-os/holo-e2e-lite:latest"
-            fi
-            FALLBACK_TARBALL="holo-e2e-lite-linux-amd64.oci.tar.gz"
-            FALLBACK_SUMS="SHA512SUMS-holo-e2e-lite.txt"
-          fi
-
-          RESOLVED_IMAGE=""
-          IMAGE_SOURCE=""
-
-          if echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin >/dev/null 2>&1 \
-            && docker pull "$TARGET_IMAGE" >/dev/null 2>&1; then
-            RESOLVED_IMAGE="$TARGET_IMAGE"
-            IMAGE_SOURCE="ghcr:${TARGET_IMAGE}"
-          else
-            echo "GHCR pull unavailable for ${TARGET_IMAGE}; falling back to sovereign OCI release tarball."
-            rm -rf /tmp/holo-oci
-            mkdir -p /tmp/holo-oci
-            curl -fsSL -o "/tmp/holo-oci/${FALLBACK_TARBALL}" \
-              "https://github.com/awesome-os/dockerimages/releases/download/v11-oci-latest/${FALLBACK_TARBALL}"
-            curl -fsSL -o "/tmp/holo-oci/${FALLBACK_SUMS}" \
-              "https://github.com/awesome-os/dockerimages/releases/download/v11-oci-latest/${FALLBACK_SUMS}"
-            (cd /tmp/holo-oci && sha512sum -c "${FALLBACK_SUMS}")
-            LOAD_OUT="$(docker load -i "/tmp/holo-oci/${FALLBACK_TARBALL}")"
-            echo "$LOAD_OUT"
-            LOADED_IMG="$(printf '%s\n' "$LOAD_OUT" | sed -n 's/^Loaded image: //p' | tail -n 1)"
-            if [ -z "$LOADED_IMG" ]; then
-              LOADED_IMG="$(printf '%s\n' "$LOAD_OUT" | sed -n 's/^Loaded image ID: //p' | tail -n 1)"
-            fi
-            RESOLVED_IMAGE="${LOADED_IMG:-$DEFAULT_IMAGE}"
-            IMAGE_SOURCE="release:v11-oci-latest (${RESOLVED_IMAGE})"
-          fi
-
-          {
-            echo "RUNNER_IMAGE=${RESOLVED_IMAGE}"
-            echo "RUNNER_TIER=${RUNNER_TIER}"
-            echo "HOLO_E2E_IMAGE_SOURCE=${IMAGE_SOURCE}"
-          } >> "$GITHUB_ENV"
-          echo "Resolved runner image: ${RESOLVED_IMAGE} (${IMAGE_SOURCE})"
+        env:
+          RUNNER_IMAGE_INPUT: ${{ inputs.runner-image }}
+          RUNNER_TIER_INPUT: ${{ inputs.runner-tier }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node .holo-ci-runtime/holo-ci/e2e-runner.mts resolve-image
 
       - name: Run containerized Lavapipe Zero-X11 E2E & holo-ci verify
         shell: bash
         env:
+          HOLO_ARTIFACTS_PATH: ${{ inputs.artifacts-path }}
+          HOLO_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          HOLO_CONFIG_PATH: ${{ inputs.config-path }}
           E2E_CMD: ${{ inputs.e2e-command }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          ARTIFACTS_DIR="${{ github.workspace }}/${{ inputs.artifacts-path }}"
-          mkdir -p "$ARTIFACTS_DIR" "$HOME/.b8g/cas/v11"
-
-          WORKDIR="/workspace"
-          if [ -n "${{ inputs.working-directory }}" ] && [ "${{ inputs.working-directory }}" != "." ]; then
-            WORKDIR="/workspace/${{ inputs.working-directory }}"
-          fi
-
-          docker run --rm \
-            -v "${{ github.workspace }}:/workspace" \
-            -v "$HOME/.b8g/cas:/var/lib/b8g/cas" \
-            -w "$WORKDIR" \
-            -e "HOLO_E2E_ARTIFACTS=/workspace/${{ inputs.artifacts-path }}" \
-            -e "HOLO_CONFIG_PATH=${{ inputs.config-path }}" \
-            -e "RUNNER_TIER=${RUNNER_TIER}" \
-            -e "E2E_CMD=${E2E_CMD}" \
-            -e "GITHUB_TOKEN=${GITHUB_TOKEN}" \
-            "$RUNNER_IMAGE" bash -euo pipefail -c '
-              if [ -x /usr/local/bin/holo-e2e-probe ]; then
-                /usr/local/bin/holo-e2e-probe --out "$HOLO_E2E_ARTIFACTS/offscreen-probe.bmp" | tee "$HOLO_E2E_ARTIFACTS/offscreen-probe.json"
-              elif [ "${RUNNER_TIER:-gpu}" = "lite" ]; then
-                printf '\''{"tier":"lite","lavapipeIcd":"skipped-lite","bmpSha512":"skipped-lite"}\n'\'' > "$HOLO_E2E_ARTIFACTS/offscreen-probe.json"
-              else
-                echo "Missing /usr/local/bin/holo-e2e-probe in gpu runner tier" >&2
-                exit 1
-              fi
-              node /workspace/.holo-ci-runtime/holo-ci/cli.mts verify \
-                --config "$HOLO_CONFIG_PATH" \
-                --receipt "$HOLO_E2E_ARTIFACTS/holo-e2e-receipt.ndjson"
-              if [ -n "$E2E_CMD" ]; then
-                bash -euo pipefail -c "$E2E_CMD"
-              fi
-            '
+        run: node .holo-ci-runtime/holo-ci/e2e-runner.mts run
 
       - name: Write Holo-E2E step summary
         if: always()
         shell: bash
-        run: |
-          set -euo pipefail
-          node -e '
-            const fs = require("node:fs");
-            const path = require("node:path");
-            const artifactsDir = process.argv[1];
-            const imageSource = process.env.HOLO_E2E_IMAGE_SOURCE || process.env.RUNNER_IMAGE || "unknown";
-            const summaryPath = process.env.GITHUB_STEP_SUMMARY;
-            if (!summaryPath) process.exit(0);
-
-            let lavapipeIcd = "n/a";
-            let bmpSha512 = "n/a";
-            const probePath = path.join(artifactsDir, "offscreen-probe.json");
-            if (fs.existsSync(probePath)) {
-              try {
-                const probe = JSON.parse(fs.readFileSync(probePath, "utf8"));
-                lavapipeIcd = probe.lavapipeIcd || probe.icd || "n/a";
-                bmpSha512 = probe.bmpSha512 || probe.sha512 || "n/a";
-              } catch {}
-            }
-
-            let verifyStatus = "missing";
-            const receiptPath = path.join(artifactsDir, "holo-e2e-receipt.ndjson");
-            if (fs.existsSync(receiptPath)) {
-              const lines = fs.readFileSync(receiptPath, "utf8").trim().split(/\r?\n/).filter(Boolean);
-              const lastLine = lines[lines.length - 1];
-              if (lastLine) {
-                try {
-                  const receipt = JSON.parse(lastLine);
-                  verifyStatus = receipt.ok ? "pass" : "fail";
-                } catch {
-                  verifyStatus = "invalid-receipt";
-                }
-              }
-            }
-
-            const md = [
-              "### Holo-E2E Offscreen Lavapipe + Zero-X11 Summary",
-              "",
-              "| Field | Value |",
-              "| :--- | :--- |",
-              `| Container Source | \`${imageSource}\` |`,
-              `| \`lavapipeIcd\` | \`${lavapipeIcd}\` |`,
-              `| \`bmpSha512\` | \`${bmpSha512}\` |`,
-              `| \`holo-ci verify\` | \`${verifyStatus}\` |`,
-              "",
-            ].join("\n");
-            fs.appendFileSync(summaryPath, md, "utf8");
-          ' "${{ github.workspace }}/${{ inputs.artifacts-path }}"
+        env:
+          HOLO_ARTIFACTS_PATH: ${{ inputs.artifacts-path }}
+        run: node .holo-ci-runtime/holo-ci/e2e-runner.mts summary
 
       - name: Upload holo-e2e artifacts
         if: always()

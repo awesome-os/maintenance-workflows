@@ -3,7 +3,7 @@
   "name": "maintenance-workflows",
   "kind": "control-plane",
   "tests": [
-    "node --test holo-ci/holo-ci.test.mts"
+    "node --test holo-ci/holo-ci.test.mts holo-ci/workflow-scripts.test.mts"
   ],
   "docs": [
     "README.md"
@@ -14,6 +14,7 @@
     "zeroHttpIpc": true,
     "spdxLicense": true,
     "gitattributes": true,
-    "codeowners": true
+    "codeowners": true,
+    "noWorkflowBloat": true
   }
 }

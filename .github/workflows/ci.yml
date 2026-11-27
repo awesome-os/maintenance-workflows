@@ -24,7 +24,7 @@ jobs:
           node-version: '26'
 
       - name: Run holo-ci unit tests
-        run: node --test holo-ci/holo-ci.test.mts
+        run: node --test holo-ci/holo-ci.test.mts holo-ci/workflow-scripts.test.mts
 
       - name: Verify maintenance-workflows via holo-ci
         run: node holo-ci/cli.mts verify --config holo-ci.json --emit-summary --receipt holo-ci-receipt.ndjson

