@@ -2,6 +2,12 @@
 
 All notable changes to `awesome-os/maintenance-workflows` (`holo-ci@v1`) are documented in this file.
 
+## [1.3.9] - 2026-11-27
+
+### Added
+- **Generic Workflow Hardener & Autofixer (`holo-ci/wf-harden.mts`, `holo-ci/wf-harden.test.mts`):** Deterministic `--check` / `--fix` autofixer matching `requireWorkflowHardening` (`mlugg/setup-zig@v2`, `actions/*@v5..v8`, top-level `concurrency`, deploy cancel-race repair, `timeout-minutes`, and `retention-days: 7`).
+- **Reusable Cloud Gravity Issue Governor (`.github/workflows/reusable-gravity-issue-governor.yml`):** Thin `77`-line `workflow_call` runner executing `scripts/gravity-issue-governor.mts` natively on GitHub Actions for **M12: The Great Decoupling**.
+
 ## [1.3.7] - 2026-11-27
 
 ### Added

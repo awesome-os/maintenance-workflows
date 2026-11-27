@@ -1,0 +1,77 @@
+name: Reusable Gravity Issue Governor (v1)
+
+on:
+  workflow_call:
+    inputs:
+      config-repo: { description: 'Repository hosting scripts/gravity-issue-governor.mts', required: false, type: string, default: 'awesome-os/awesome-os' }
+      wip-max: { description: 'Maximum concurrent auto-governed issues (WIP budget)', required: false, type: string, default: '5' }
+      damping-factor: { description: 'Critical gravity damping factor (0.0 - 1.0)', required: false, type: string, default: '0.85' }
+      apply-closes: { description: 'Apply verified green issue auto-closures via gh CLI', required: false, type: boolean, default: false }
+      apply-upgrades: { description: 'Apply wave count/title consistency upgrades via gh CLI', required: false, type: boolean, default: false }
+      apply-auto: { description: 'Create/update damped-gravity auto issues via gh CLI', required: false, type: boolean, default: false }
+      node-version: { description: 'Node.js version for erasable-TS execution', required: false, type: string, default: '26' }
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+jobs:
+  gravity-issue-governor:
+    name: Gravity Issue Governor (${{ inputs.config-repo }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout governor workspace
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.config-repo }}
+
+      - name: Setup Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Run gravity issue governor & publish summary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOV_WIP_MAX: ${{ inputs.wip-max }}
+          GOV_DAMPING: ${{ inputs.damping-factor }}
+          GOV_APPLY_CLOSES: ${{ inputs.apply-closes }}
+          GOV_APPLY_UPGRADES: ${{ inputs.apply-upgrades }}
+          GOV_APPLY_AUTO: ${{ inputs.apply-auto }}
+        run: |
+          ARGS=(--plan --json --wip-max "${GOV_WIP_MAX}" --damping "${GOV_DAMPING}")
+          if [ "${GOV_APPLY_CLOSES}" = "true" ]; then ARGS+=(--apply-closes); fi
+          if [ "${GOV_APPLY_UPGRADES}" = "true" ]; then ARGS+=(--apply-upgrades); fi
+          if [ "${GOV_APPLY_AUTO}" = "true" ]; then ARGS+=(--apply-auto); fi
+          node scripts/gravity-issue-governor.mts "${ARGS[@]}" > gravity-governor-plan.json
+          node -e '
+            const fs = require("node:fs");
+            const p = JSON.parse(fs.readFileSync("gravity-governor-plan.json", "utf8"));
+            const lines = [
+              "## Gravity Issue Governor Plan",
+              "",
+              "| Metric | Value |",
+              "| :--- | :--- |",
+              `| Schema / ABI | \`${p.schema}\` (\`${p.abiMagic}\`) |`,
+              `| WIP Active / Max | \`${p.activeAutoIssues}/${p.wipMax}\` (zeta=\`${p.dampingFactor}\`, slots=\`${p.availableWipSlots}\`) |`,
+              `| Closes Planned | \`${p.closeActions.length}\` |`,
+              `| Wave Upgrades | \`${p.waveUpgrades.length}\` |`,
+              `| Auto Issue Upserts | \`${p.autoIssueActions.length}\` |`,
+              `| Deferred by Damping | \`${p.deferredByDamping.length}\` |`,
+            ];
+            if (process.env.GITHUB_STEP_SUMMARY) {
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${lines.join("\n")}\n`, "utf8");
+            }
+          '
+
+      - name: Upload gravity governor plan
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gravity-governor-plan
+          path: gravity-governor-plan.json
+          retention-days: 7
+          if-no-files-found: warn
