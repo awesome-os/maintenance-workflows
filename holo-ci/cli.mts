@@ -9,7 +9,7 @@ import {
 import { runBoundaryAudit } from './boundary.mts';
 import { runBumpAsync } from './bump.mts';
 import { collectFleetForensics } from './fleet-forensics.mts';
-import { runLockCompat } from './lock-compat.mts';
+import { runLockCompat, tryLoadHoloPmLockfileHelper } from './lock-compat.mts';
 import { runMaintain } from './maintain.mts';
 import { runPack } from './pack.mts';
 import {
@@ -443,6 +443,7 @@ export async function executeCli(argv: string[]): Promise<{ exitCode: number; re
     const ecosystem = opts.ecosystem ?? 'npm';
     const resolvedOutDir = opts.outDir ?? (ecosystem !== 'npm' ? opts.outFile : undefined);
     const resolvedOutFile = ecosystem === 'npm' ? opts.outFile : undefined;
+    await tryLoadHoloPmLockfileHelper(opts.cwd);
     const lockCompat = runLockCompat({
       cwd: opts.cwd,
       ecosystem,

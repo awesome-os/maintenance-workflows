@@ -14,13 +14,19 @@ import {
   type HoloBoundaryManifest,
 } from './boundary.mts';
 import { fetchLatestUpstreamVersion, runBump, runBumpAsync } from './bump.mts';
-import { runLockCompat } from './lock-compat.mts';
+import {
+  readLockfileVersion,
+  runLockCompat,
+  tryLoadHoloPmLockfileHelper,
+  writeOrUpgradeLockfile,
+} from './lock-compat.mts';
 import { runMaintain, verifyBundleManifest } from './maintain.mts';
 import { runPack } from './pack.mts';
 import {
   B8G_ABI_MAGIC_V3,
   HOLO_CI_RECEIPT_SCHEMA,
   HOLO_CI_SCHEMA,
+  HOLO_LOCKFILE_VERSION,
   HOLO_RULE_VIOLATION_SCHEMA,
   HOLO_V11_MANIFEST_SCHEMA,
   boundaryViolationToRuleViolation,
@@ -932,7 +938,7 @@ describe('holo-ci maintain', () => {
 });
 
 describe('holo-ci lock-compat', () => {
-  it('synthesizes deterministic byte-sorted lockfileVersion 3 without modifying node_modules', () => {
+  it('synthesizes deterministic byte-sorted lockfileVersion 2 without modifying node_modules', () => {
     const dirA = makeTempDir('holo-ci-lock-a-');
     const dirB = makeTempDir('holo-ci-lock-b-');
     try {
@@ -1031,7 +1037,7 @@ describe('holo-ci lock-compat', () => {
 
       assert.equal(resA.ok, true);
       assert.equal(resA.written, true);
-      assert.equal(resA.lockfileVersion, 3);
+      assert.equal(resA.lockfileVersion, HOLO_LOCKFILE_VERSION);
       assert.equal(resA.holoCasStore, 'v11');
       assert.equal(resA.zeroCopyNodeModules, true);
       assert.equal(resA.workspaceCount, 1);
@@ -1049,7 +1055,7 @@ describe('holo-ci lock-compat', () => {
         zeroCopyNodeModules: boolean;
         packages: Record<string, { version?: string; integrity?: string; resolved?: string; link?: boolean }>;
       };
-      assert.equal(parsed.lockfileVersion, 3);
+      assert.equal(parsed.lockfileVersion, HOLO_LOCKFILE_VERSION);
       assert.equal(parsed.holoCasStore, 'v11');
       assert.equal(parsed.zeroCopyNodeModules, true);
       assert.equal(parsed.packages['node_modules/@types/node'].version, '24.5.1');
@@ -1128,7 +1134,7 @@ describe('holo-ci lock-compat', () => {
       const npmLock = JSON.parse(readFileSync(join(outBase, 'package-lock.json'), 'utf8')) as {
         lockfileVersion: number;
       };
-      assert.equal(npmLock.lockfileVersion, 3);
+      assert.equal(npmLock.lockfileVersion, HOLO_LOCKFILE_VERSION);
 
       // 2. cargo
       const cargoCfg = readFileSync(join(outBase, '.cargo', 'config.toml'), 'utf8');
@@ -1595,13 +1601,76 @@ describe('holo-ci CLI', () => {
       assert.equal(receipt.abiMagic, B8G_ABI_MAGIC_V3);
       assert.equal(receipt.phase, 'lock-compat');
       assert.equal(receipt.ok, true);
-      assert.equal(receipt.lockCompat?.lockfileVersion, 3);
+      assert.equal(receipt.lockCompat?.lockfileVersion, HOLO_LOCKFILE_VERSION);
       assert.equal(receipt.lockCompat?.holoCasStore, 'v11');
       assert.equal(receipt.lockCompat?.zeroCopyNodeModules, true);
       assert.equal(receipt.lockCompat?.dryRun, true);
       assert.equal(receipt.lockCompat?.written, false);
       assert.equal(existsSync(join(dir, 'package-lock.json')), false);
       assert.equal(existsSync(join(dir, 'node_modules')), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('enforces lockfileVersion 0 -> 2 upgrade and > 2 downgrade guard via holo-pm helper & fallback', async () => {
+    const dir = makeTempDir('holo-ci-lockfile-ver-');
+    try {
+      const helper = await tryLoadHoloPmLockfileHelper(dir);
+      assert.equal(typeof helper.readLockfileVersion, 'function');
+      assert.equal(typeof helper.writeOrUpgradeLockfile, 'function');
+
+      const lockPath = join(dir, 'holo-compiler-lockfile.json');
+      assert.equal(readLockfileVersion(lockPath), 0);
+
+      // Unversioned existing file -> readLockfileVersion returns 0 -> upgraded to 2
+      writeFileSync(lockPath, JSON.stringify({ name: 'unversioned', packages: {} }), 'utf8');
+      assert.equal(readLockfileVersion(lockPath), 0);
+
+      const upgraded = writeOrUpgradeLockfile(
+        lockPath,
+        `${JSON.stringify({ name: 'unversioned', lockfileVersion: HOLO_LOCKFILE_VERSION, packages: {} }, null, 2)}\n`,
+        HOLO_LOCKFILE_VERSION,
+      );
+      assert.equal(upgraded.written, true);
+      assert.equal(upgraded.action, 'upgraded');
+      assert.equal(upgraded.existingVersion, 0);
+      assert.equal(upgraded.resultingVersion, HOLO_LOCKFILE_VERSION);
+      assert.equal(readLockfileVersion(lockPath), HOLO_LOCKFILE_VERSION);
+
+      // Higher existing version (> 2) -> downgrade guard keeps existing file untouched
+      const higherPayload = `${JSON.stringify({ name: 'future', lockfileVersion: 3, packages: { keep: true } }, null, 2)}\n`;
+      writeFileSync(lockPath, higherPayload, 'utf8');
+      assert.equal(readLockfileVersion(lockPath), 3);
+
+      const guarded = writeOrUpgradeLockfile(
+        lockPath,
+        `${JSON.stringify({ name: 'downgraded', lockfileVersion: HOLO_LOCKFILE_VERSION, packages: {} }, null, 2)}\n`,
+        HOLO_LOCKFILE_VERSION,
+      );
+      assert.equal(guarded.written, false);
+      assert.equal(guarded.action, 'kept-higher');
+      assert.equal(guarded.existingVersion, 3);
+      assert.equal(guarded.resultingVersion, 3);
+      assert.equal(readFileSync(lockPath, 'utf8'), higherPayload);
+
+      // runLockCompat upgrades unversioned package-lock.json (0 -> 2) and refuses to downgrade lockfileVersion > 2
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'ver-test', version: '1.0.0' }), 'utf8');
+      const pkgLockPath = join(dir, 'package-lock.json');
+      writeFileSync(pkgLockPath, JSON.stringify({ name: 'old-unversioned' }), 'utf8');
+
+      const upgradeRes = runLockCompat({ cwd: dir, ecosystem: 'npm' });
+      assert.equal(upgradeRes.ok, true);
+      assert.equal(upgradeRes.lockfileVersion, HOLO_LOCKFILE_VERSION);
+      assert.equal(upgradeRes.artifacts[0].written, true);
+      assert.equal(readLockfileVersion(pkgLockPath), HOLO_LOCKFILE_VERSION);
+
+      const futurePkgLock = `${JSON.stringify({ name: 'future-lock', lockfileVersion: 4, packages: {} }, null, 2)}\n`;
+      writeFileSync(pkgLockPath, futurePkgLock, 'utf8');
+      const guardRes = runLockCompat({ cwd: dir, ecosystem: 'npm' });
+      assert.equal(guardRes.ok, true);
+      assert.equal(guardRes.artifacts[0].written, false);
+      assert.equal(readFileSync(pkgLockPath, 'utf8'), futurePkgLock);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

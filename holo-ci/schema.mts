@@ -10,6 +10,7 @@ export const HOLO_CI_RECEIPT_SCHEMA = 'holo-ci.receipt.v1' as const;
 export const HOLO_V11_MANIFEST_SCHEMA = 'holo-v11.manifest.v1' as const;
 export const HOLO_BOUNDARY_SCHEMA = 'holo-boundary.v1' as const;
 export const HOLO_RULE_VIOLATION_SCHEMA = 'holo-rule-violation.v1' as const;
+export const HOLO_LOCKFILE_VERSION = 2 as const;
 export const B8G_ABI_MAGIC_V3 = '0x33564742' as const;
 
 export type HoloRuleSeverity = 'error' | 'warning' | 'info';
@@ -299,7 +300,7 @@ export interface HoloCiLockCompatPackageEntry {
 export interface HoloCiLockfileV3 {
   name: string;
   version: string;
-  lockfileVersion: 3;
+  lockfileVersion: number;
   requires: true;
   holoCasStore: 'v11';
   zeroCopyNodeModules: true;
@@ -339,7 +340,7 @@ export interface HoloCiLockCompatResult {
   outDir: string;
   dryRun: boolean;
   written: boolean;
-  lockfileVersion: 3;
+  lockfileVersion: number;
   holoCasStore: 'v11';
   zeroCopyNodeModules: true;
   packageCount: number;

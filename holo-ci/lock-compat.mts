@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   B8G_ABI_MAGIC_V3,
+  HOLO_LOCKFILE_VERSION,
   type HoloCiLockCompatArtifact,
   type HoloCiLockCompatEcosystem,
   type HoloCiLockCompatPackageEntry,
@@ -10,6 +12,120 @@ import {
   type HoloCiLockCompatSingleEcosystem,
   type HoloCiLockfileV3,
 } from './schema.mts';
+
+export interface HoloPmLockfileWriteResult {
+  readonly written: boolean;
+  readonly action: 'created' | 'upgraded' | 'kept-higher' | 'updated';
+  readonly existingVersion: number;
+  readonly resultingVersion: number;
+}
+
+export interface HoloPmLockfileHelper {
+  readonly source: 'holo-pm' | 'inline-fallback';
+  readLockfileVersion(filePath: string): number;
+  writeOrUpgradeLockfile(
+    filePath: string,
+    content: string,
+    nextVersion?: number,
+  ): HoloPmLockfileWriteResult;
+}
+
+export function readLockfileVersion(filePath: string): number {
+  if (!existsSync(filePath)) return 0;
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as { lockfileVersion?: unknown };
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      typeof parsed.lockfileVersion === 'number' &&
+      Number.isFinite(parsed.lockfileVersion) &&
+      parsed.lockfileVersion >= 0
+    ) {
+      return parsed.lockfileVersion;
+    }
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function writeOrUpgradeLockfile(
+  filePath: string,
+  content: string,
+  nextVersion: number = HOLO_LOCKFILE_VERSION,
+): HoloPmLockfileWriteResult {
+  const exists = existsSync(filePath);
+  const existingVersion = exists ? readLockfileVersion(filePath) : 0;
+
+  if (exists && existingVersion > nextVersion) {
+    return {
+      written: false,
+      action: 'kept-higher',
+      existingVersion,
+      resultingVersion: existingVersion,
+    };
+  }
+
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, content, 'utf8');
+
+  const action: HoloPmLockfileWriteResult['action'] = !exists
+    ? 'created'
+    : existingVersion < nextVersion
+      ? 'upgraded'
+      : 'updated';
+
+  return {
+    written: true,
+    action,
+    existingVersion,
+    resultingVersion: nextVersion,
+  };
+}
+
+const INLINE_LOCKFILE_HELPER: HoloPmLockfileHelper = {
+  source: 'inline-fallback',
+  readLockfileVersion,
+  writeOrUpgradeLockfile,
+};
+
+let cachedHoloPmHelper: HoloPmLockfileHelper | undefined;
+
+function findHoloPmLockfileModule(cwd: string): string | undefined {
+  let current = resolve(cwd);
+  while (true) {
+    const candidate = join(current, 'intersections', 'holo-compiler', 'lockfile.mts');
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return undefined;
+}
+
+export async function tryLoadHoloPmLockfileHelper(cwd: string): Promise<HoloPmLockfileHelper> {
+  const modulePath = findHoloPmLockfileModule(cwd);
+  if (modulePath) {
+    try {
+      const mod = (await import(pathToFileURL(modulePath).href)) as {
+        readLockfileVersion?: HoloPmLockfileHelper['readLockfileVersion'];
+        writeOrUpgradeLockfile?: HoloPmLockfileHelper['writeOrUpgradeLockfile'];
+      };
+      if (typeof mod.readLockfileVersion === 'function' && typeof mod.writeOrUpgradeLockfile === 'function') {
+        const helper: HoloPmLockfileHelper = {
+          source: 'holo-pm',
+          readLockfileVersion: mod.readLockfileVersion,
+          writeOrUpgradeLockfile: mod.writeOrUpgradeLockfile,
+        };
+        cachedHoloPmHelper = helper;
+        return helper;
+      }
+    } catch {
+      // Fall back to zero-dependency inline helper
+    }
+  }
+  return INLINE_LOCKFILE_HELPER;
+}
 
 export interface AptCompatStanzaInput {
   package: string;
@@ -537,10 +653,18 @@ function emitProjectionFile(
   targetPath: string,
   content: string,
   dryRun: boolean,
+  lockfileVersion?: number,
 ): HoloCiLockCompatArtifact {
+  let written = !dryRun;
   if (!dryRun) {
-    mkdirSync(dirname(targetPath), { recursive: true });
-    writeFileSync(targetPath, content, 'utf8');
+    if (lockfileVersion !== undefined) {
+      const helper = cachedHoloPmHelper ?? INLINE_LOCKFILE_HELPER;
+      const writeRes = helper.writeOrUpgradeLockfile(targetPath, content, lockfileVersion);
+      written = writeRes.written;
+    } else {
+      mkdirSync(dirname(targetPath), { recursive: true });
+      writeFileSync(targetPath, content, 'utf8');
+    }
   }
   const relPath = relative(baseOutDir, targetPath).replace(/\\/g, '/');
   const artifact: HoloCiLockCompatArtifact = {
@@ -549,7 +673,7 @@ function emitProjectionFile(
     relPath: relPath || basename(targetPath),
     bytes: Buffer.byteLength(content, 'utf8'),
     sha256: sha256Text(content),
-    written: !dryRun,
+    written,
   };
   artifacts.push(artifact);
   return artifact;
@@ -700,7 +824,7 @@ function synthesizeNpmLock(
   const lockfile: HoloCiLockfileV3 = {
     name: rootName,
     version: rootVersion,
-    lockfileVersion: 3,
+    lockfileVersion: HOLO_LOCKFILE_VERSION,
     requires: true,
     holoCasStore: 'v11',
     zeroCopyNodeModules: true,
@@ -709,7 +833,15 @@ function synthesizeNpmLock(
 
   const serialized = `${JSON.stringify(lockfile, null, 2)}\n`;
   const outFile = explicitOutFile ? resolve(cwd, explicitOutFile) : resolve(baseOutDir, 'package-lock.json');
-  const artifact = emitProjectionFile(artifacts, 'npm', baseOutDir, outFile, serialized, dryRun);
+  const artifact = emitProjectionFile(
+    artifacts,
+    'npm',
+    baseOutDir,
+    outFile,
+    serialized,
+    dryRun,
+    HOLO_LOCKFILE_VERSION,
+  );
 
   return {
     rootName,
@@ -1773,7 +1905,7 @@ export function runLockCompat(opts: LockCompatOptions = {}): HoloCiLockCompatRes
     outDir: baseOutDir,
     dryRun,
     written: !dryRun,
-    lockfileVersion: 3,
+    lockfileVersion: npmLockfile?.lockfileVersion ?? HOLO_LOCKFILE_VERSION,
     holoCasStore: 'v11',
     zeroCopyNodeModules: true,
     packageCount,
