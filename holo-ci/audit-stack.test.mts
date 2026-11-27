@@ -704,11 +704,24 @@ describe('holo-ci programmatic audit-stack registry', () => {
         'utf8',
       );
 
-      // Negative cases: skipped directories, .d.ts, comments, string literals, and clean erasable TS
+      // Negative cases: skipped directories, .d.ts, comments, string/template literals (even after regex with backticks),
+      // object-typed constructor options with readonly fields, and clean erasable TS
       mkdirSync(join(dir, 'node_modules', 'pkg'), { recursive: true });
       mkdirSync(join(dir, 'dist'), { recursive: true });
+      mkdirSync(join(dir, 'packages', 'ts-morph-codemods', 'ts-morph', 'src'), { recursive: true });
+      mkdirSync(join(dir, 'packages', '@component-manager', 'pnpm-component-src', 'src'), { recursive: true });
       writeFileSync(join(dir, 'node_modules', 'pkg', 'index.ts'), 'export enum Ignored { A = 1 }\n', 'utf8');
       writeFileSync(join(dir, 'dist', 'out.ts'), 'export enum BuiltIgnored { A = 1 }\n', 'utf8');
+      writeFileSync(
+        join(dir, 'packages', 'ts-morph-codemods', 'ts-morph', 'src', 'vendor.ts'),
+        'export declare namespace errors { const a = 1; }\n',
+        'utf8',
+      );
+      writeFileSync(
+        join(dir, 'packages', '@component-manager', 'pnpm-component-src', 'src', 'vendor.ts'),
+        'export enum VendorEnum { A = 1 }\n',
+        'utf8',
+      );
       writeFileSync(join(dir, 'src', 'types.d.ts'), 'export declare enum AmbientOk { A = 1 }\n', 'utf8');
       writeFileSync(
         join(dir, 'src', 'clean.mts'),
@@ -716,10 +729,18 @@ describe('holo-ci programmatic audit-stack registry', () => {
           '// enum CommentEnum { A = 1 }',
           '/* namespace CommentNs { export const x = 1; } */',
           "export const example = 'enum StringEnum { A = 1 }';",
+          'export const fence = /```js/;',
+          'export const tpl = [',
+          '  `export enum BadEnum { A = 1 }`,',
+          '  `export namespace BadNs {}`,',
+          '  `class Bad { constructor(public x: number) {} }`,',
+          '];',
           'export const Status = { Ok: 1 } as const;',
           'export class CleanBox {',
           '  readonly id: string;',
-          '  constructor(id: string) { this.id = id; }',
+          '  constructor(opts?: { readonly id?: string; readonly tag?: string }) {',
+          '    this.id = opts?.id ?? "ok";',
+          '  }',
           '}',
           '',
         ].join('\n'),
@@ -961,9 +982,14 @@ describe('holo-ci programmatic audit-stack registry', () => {
         assert.match(v.fingerprint, /^[0-9a-f]{16}$/);
       }
 
-      // Shrink artifacts under default 512 KB budget -> passes
+      // Shrink artifacts under default 512 KB budget + oversized .b8p CAS bundle under sectium-maintenance/dist -> passes
       writeFileSync(join(dir, 'dist', 'too-big.dll'), Buffer.alloc(128 * 1024));
       writeFileSync(join(dir, 'sections', 'kernel', 'dist', 'cp.so'), Buffer.alloc(16 * 1024));
+      mkdirSync(join(dir, 'sections', 'sectium-maintenance', 'dist', 'components'), { recursive: true });
+      writeFileSync(
+        join(dir, 'sections', 'sectium-maintenance', 'dist', 'components', 'v8-shared-win64.b8p'),
+        Buffer.alloc(1024 * 1024),
+      );
       const passRes = await runBuiltinAuditStack({
         cwd: dir,
         repo: 'awesome-os/binary-budget-test',
@@ -972,6 +998,24 @@ describe('holo-ci programmatic audit-stack registry', () => {
       });
       assert.equal(passRes.ok, true);
       assert.equal(passRes.violationCount, 0);
+
+      // Native .dll under sectium-maintenance/dist still enforces strict 512 KB budget
+      writeFileSync(
+        join(dir, 'sections', 'sectium-maintenance', 'dist', 'components', 'native-shim.dll'),
+        Buffer.alloc(600 * 1024),
+      );
+      const nativeFailRes = await runBuiltinAuditStack({
+        cwd: dir,
+        repo: 'awesome-os/binary-budget-test',
+        mode: 'exhaust',
+        onlyIds: ['holo-ci/binary-budget'],
+      });
+      assert.equal(nativeFailRes.ok, false);
+      assert.equal(nativeFailRes.violationCount, 1);
+      assert.equal(
+        nativeFailRes.violations[0]?.file,
+        'sections/sectium-maintenance/dist/components/native-shim.dll',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -999,6 +1043,21 @@ describe('holo-ci programmatic audit-stack registry', () => {
           "import { join } from 'node:path';",
           "const d = mkdtempSync(join(tmpdir(), 'ok-'));",
           "try { writeFileSync(join(d, 'ok.txt'), 'ok'); } finally { rmSync(d, { recursive: true, force: true }); }",
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+      writeFileSync(
+        join(dir, 'src', 'vfs.test.mts'),
+        [
+          "const repo = { writeFile: (_p: string, _c: string) => {} };",
+          "const parentRepo = { writeFile: (_p: string, _c: string) => {} };",
+          "const vfs = { writeFile: (_p: string, _c: string) => {} };",
+          "const memFs = { mkdirSync: (_p: string, _opts?: unknown) => {} };",
+          "repo.writeFile('src/app.ts', 'export const ok = 1;');",
+          "parentRepo.writeFile('shared/common.ts', 'export const s = 1;');",
+          "vfs.writeFile('index.html', '<html></html>');",
+          "memFs.mkdirSync('/workspace/.tmp-snapshots', { recursive: true });",
           '',
         ].join('\n'),
         'utf8',
@@ -1073,12 +1132,44 @@ describe('holo-ci programmatic audit-stack registry', () => {
       });
       assert.equal(passRes.ok, true);
       assert.equal(passRes.violationCount, 0);
+
+      // Compound SPDX expressions ('MIT AND BSD-3-Clause', 'BSD-3-Clause OR MIT') -> pass
+      for (const expr of ['MIT AND BSD-3-Clause', 'BSD-3-Clause OR MIT']) {
+        writeFileSync(
+          join(dir, 'package.json'),
+          JSON.stringify({ name: 'spdx-test', license: expr }, null, 2),
+          'utf8',
+        );
+        const compoundPassRes = await runBuiltinAuditStack({
+          cwd: dir,
+          repo: 'awesome-os/spdx-test',
+          mode: 'exhaust',
+          onlyIds: ['holo-ci/spdx-header'],
+        });
+        assert.equal(compoundPassRes.ok, true);
+        assert.equal(compoundPassRes.violationCount, 0);
+      }
+
+      // Unapproved token inside compound SPDX expression -> fails
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({ name: 'spdx-test', license: 'MIT AND GPL-3.0-only' }, null, 2),
+        'utf8',
+      );
+      const compoundFailRes = await runBuiltinAuditStack({
+        cwd: dir,
+        repo: 'awesome-os/spdx-test',
+        mode: 'exhaust',
+        onlyIds: ['holo-ci/spdx-header'],
+      });
+      assert.equal(compoundFailRes.ok, false);
+      assert.equal(compoundFailRes.violationCount, 1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('holo-ci/abi-surface checks abi-golden.json for B8G_ABI_MAGIC_V3 (0x33564742) and existing header', async () => {
+  it('holo-ci/abi-surface validates holo-abi-golden.v1 schema, structs/constants, optional B8G_ABI_MAGIC_V3, and header', async () => {
     const dir = makeTempDir('holo-audit-abi-');
     try {
       seedCleanRepo(dir);
@@ -1097,7 +1188,8 @@ describe('holo-ci programmatic audit-stack registry', () => {
       });
       assert.equal(failRes.ok, false);
       assert.equal(failRes.failedAudits, 1);
-      assert.equal(failRes.violationCount, 2);
+      // missing schema, invalid abiMagic, empty structs/constants, missing header = 4 violations
+      assert.equal(failRes.violationCount, 4);
       for (const v of failRes.violations) {
         assert.equal(v.schema, HOLO_RULE_VIOLATION_SCHEMA);
         assert.equal(v.ruleId, 'B8G-ABI-SURFACE');
@@ -1106,21 +1198,54 @@ describe('holo-ci programmatic audit-stack registry', () => {
         assert.match(v.fingerprint, /^[0-9a-f]{16}$/);
       }
 
-      // Fix abiMagic to B8G_ABI_MAGIC_V3 and create referenced header -> passes
+      // Valid holo-abi-golden.v1 without abiMagic (like sections/runtime/abi-golden.json) -> passes
       writeFileSync(join(dir, 'sections', 'cp', 'cp_abi.h'), '#define B8G_ABI_MAGIC_V3 0x33564742\n', 'utf8');
       writeFileSync(
         join(dir, 'sections', 'cp', 'abi-golden.json'),
-        JSON.stringify({ abiMagic: B8G_ABI_MAGIC_V3, header: 'sections/cp/cp_abi.h' }, null, 2),
+        JSON.stringify(
+          {
+            schema: 'holo-abi-golden.v1',
+            header: 'sections/cp/cp_abi.h',
+            constants: { COMPONENT_API_VERSION: 2 },
+            structs: {},
+          },
+          null,
+          2,
+        ),
         'utf8',
       );
-      const passRes = await runBuiltinAuditStack({
+      const passNoMagicRes = await runBuiltinAuditStack({
         cwd: dir,
         repo: 'awesome-os/abi-test',
         mode: 'exhaust',
         onlyIds: ['holo-ci/abi-surface'],
       });
-      assert.equal(passRes.ok, true);
-      assert.equal(passRes.violationCount, 0);
+      assert.equal(passNoMagicRes.ok, true);
+      assert.equal(passNoMagicRes.violationCount, 0);
+
+      // Valid holo-abi-golden.v1 with abiMagic === B8G_ABI_MAGIC_V3 -> passes
+      writeFileSync(
+        join(dir, 'sections', 'cp', 'abi-golden.json'),
+        JSON.stringify(
+          {
+            schema: 'holo-abi-golden.v1',
+            abiMagic: B8G_ABI_MAGIC_V3,
+            header: 'sections/cp/cp_abi.h',
+            structs: { cp_header_t: { sizeof: 16, alignof: 8 } },
+          },
+          null,
+          2,
+        ),
+        'utf8',
+      );
+      const passWithMagicRes = await runBuiltinAuditStack({
+        cwd: dir,
+        repo: 'awesome-os/abi-test',
+        mode: 'exhaust',
+        onlyIds: ['holo-ci/abi-surface'],
+      });
+      assert.equal(passWithMagicRes.ok, true);
+      assert.equal(passWithMagicRes.violationCount, 0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

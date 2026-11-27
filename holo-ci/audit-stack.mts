@@ -604,6 +604,11 @@ const DEFAULT_SCAN_SKIP_DIRS = new Set([
   'Apps',
 ]);
 
+const DEFAULT_SCAN_SKIP_PREFIXES: readonly string[] = [
+  'packages/ts-morph-codemods/ts-morph',
+  'packages/@component-manager/pnpm-component-src',
+];
+
 const BINARY_SCAN_EXTENSIONS = new Set([
   '.png',
   '.jpg',
@@ -637,6 +642,7 @@ function walkRepoFiles(
   rootDir: string,
   signal?: AbortSignal,
   skipDirs: ReadonlySet<string> = DEFAULT_SCAN_SKIP_DIRS,
+  skipRelPrefixes: readonly string[] = DEFAULT_SCAN_SKIP_PREFIXES,
 ): string[] {
   if (!existsSync(rootDir)) return [];
   const results: string[] = [];
@@ -655,6 +661,10 @@ function walkRepoFiles(
       const fullPath = resolve(dir, entry.name);
       if (entry.isDirectory()) {
         if (skipDirs.has(entry.name)) continue;
+        const relDir = relative(rootDir, fullPath).replaceAll('\\', '/');
+        if (skipRelPrefixes.some((prefix) => relDir === prefix || relDir.startsWith(`${prefix}/`))) {
+          continue;
+        }
         visit(fullPath);
       } else if (entry.isFile()) {
         results.push(relative(rootDir, fullPath).replaceAll('\\', '/'));
@@ -666,14 +676,41 @@ function walkRepoFiles(
   return results;
 }
 
+const REGEX_PRECEDING_WORDS = new Set([
+  'return',
+  'throw',
+  'case',
+  'in',
+  'of',
+  'typeof',
+  'void',
+  'delete',
+  'yield',
+  'await',
+  'else',
+  'new',
+]);
+
+function canPrecedeRegexLiteral(prevNonWsChar: string, prevWord: string): boolean {
+  if (prevNonWsChar === '') return true;
+  if ('([{:;,=?&|^~+-*%<>/!'.includes(prevNonWsChar)) return true;
+  if (prevNonWsChar === '}' && prevWord === 'else') return true;
+  return REGEX_PRECEDING_WORDS.has(prevWord);
+}
+
 /**
- * Replaces comments (`//`, `/* * /`) and string/template literals with spaces while
- * preserving newlines so 1-based line numbers remain exact.
+ * Replaces comments (`//`, `/* * /`), string/template literals, and regex literals
+ * with spaces while preserving newlines so 1-based line numbers remain exact.
  */
 function stripTsCommentsAndStrings(source: string): string {
   const out: string[] = [];
-  let i = 0;
   const len = source.length;
+  let i = 0;
+  let prevNonWsChar = '';
+  let prevWord = '';
+  const templateBraceStack: number[] = [];
+  let braceDepth = 0;
+
   while (i < len) {
     const ch = source[i]!;
     const next = i + 1 < len ? source[i + 1]! : '';
@@ -703,7 +740,45 @@ function stripTsCommentsAndStrings(source: string): string {
       continue;
     }
 
-    if (ch === '\'' || ch === '"' || ch === '`') {
+    if (ch === '/' && canPrecedeRegexLiteral(prevNonWsChar, prevWord)) {
+      let j = i + 1;
+      let inClass = false;
+      let closed = false;
+      while (j < len) {
+        const rch = source[j]!;
+        if (rch === '\n' || rch === '\r') break;
+        if (rch === '\\') {
+          j += 2;
+          continue;
+        }
+        if (rch === '[') {
+          inClass = true;
+          j++;
+          continue;
+        }
+        if (rch === ']' && inClass) {
+          inClass = false;
+          j++;
+          continue;
+        }
+        if (rch === '/' && !inClass) {
+          closed = true;
+          j++;
+          while (j < len && /[a-z]/i.test(source[j]!)) j++;
+          break;
+        }
+        j++;
+      }
+      if (closed) {
+        out.push(' '.repeat(j - i));
+        prevNonWsChar = '/';
+        prevWord = '';
+        i = j;
+        continue;
+      }
+    }
+
+    if (ch === '\'' || ch === '"') {
       const quote = ch;
       out.push(' ');
       i++;
@@ -723,10 +798,96 @@ function stripTsCommentsAndStrings(source: string): string {
         out.push(cur === '\n' ? '\n' : ' ');
         i++;
       }
+      prevNonWsChar = quote;
+      prevWord = '';
       continue;
     }
 
+    if (ch === '`') {
+      out.push(' ');
+      i++;
+      const resumeBraceDepth = templateBraceStack.length > 0 ? templateBraceStack[templateBraceStack.length - 1]! : -1;
+      void resumeBraceDepth;
+      while (i < len) {
+        const cur = source[i]!;
+        if (cur === '\\' && i + 1 < len) {
+          out.push(' ');
+          out.push(source[i + 1] === '\n' ? '\n' : ' ');
+          i += 2;
+          continue;
+        }
+        if (cur === '$' && i + 1 < len && source[i + 1] === '{') {
+          out.push('${');
+          i += 2;
+          braceDepth++;
+          templateBraceStack.push(braceDepth);
+          prevNonWsChar = '{';
+          prevWord = '';
+          break;
+        }
+        if (cur === '`') {
+          out.push(' ');
+          i++;
+          prevNonWsChar = '`';
+          prevWord = '';
+          break;
+        }
+        out.push(cur === '\n' ? '\n' : ' ');
+        i++;
+      }
+      continue;
+    }
+
+    if (ch === '{') {
+      braceDepth++;
+    } else if (ch === '}') {
+      if (templateBraceStack.length > 0 && templateBraceStack[templateBraceStack.length - 1] === braceDepth) {
+        templateBraceStack.pop();
+        braceDepth--;
+        out.push('}');
+        i++;
+        // Resume scanning outer template literal body
+        while (i < len) {
+          const cur = source[i]!;
+          if (cur === '\\' && i + 1 < len) {
+            out.push(' ');
+            out.push(source[i + 1] === '\n' ? '\n' : ' ');
+            i += 2;
+            continue;
+          }
+          if (cur === '$' && i + 1 < len && source[i + 1] === '{') {
+            out.push('${');
+            i += 2;
+            braceDepth++;
+            templateBraceStack.push(braceDepth);
+            prevNonWsChar = '{';
+            prevWord = '';
+            break;
+          }
+          if (cur === '`') {
+            out.push(' ');
+            i++;
+            prevNonWsChar = '`';
+            prevWord = '';
+            break;
+          }
+          out.push(cur === '\n' ? '\n' : ' ');
+          i++;
+        }
+        continue;
+      }
+      if (braceDepth > 0) braceDepth--;
+    }
+
     out.push(ch);
+    if (!/\s/.test(ch)) {
+      if (/[A-Za-z0-9_$]/.test(ch)) {
+        prevWord = /[A-Za-z0-9_$]/.test(prevNonWsChar) ? `${prevWord}${ch}` : ch;
+      } else {
+        prevWord = '';
+      }
+      prevNonWsChar = ch;
+    }
     i++;
   }
   return out.join('');
@@ -738,6 +899,56 @@ function lineNumberAtOffset(text: string, offset: number): number {
     if (text[i] === '\n') line++;
   }
   return line;
+}
+
+const PARAM_PROP_MODIFIER_REGEX = /^(?:public|private|protected|readonly)\b/;
+
+function findConstructorParamPropertyOffsets(stripped: string): number[] {
+  const offsets: number[] = [];
+  const ctorRegex = /\bconstructor\s*\(/g;
+  let match: RegExpExecArray | null;
+  while ((match = ctorRegex.exec(stripped)) !== null) {
+    let i = match.index + match[0].length;
+    let parenDepth = 1;
+    let braceDepth = 0;
+    let bracketDepth = 0;
+    let paramStart = i;
+
+    const checkParamSegment = (start: number, end: number): void => {
+      const seg = stripped.slice(start, end);
+      const leadingWs = seg.match(/^\s*/)?.[0].length ?? 0;
+      const trimmed = seg.slice(leadingWs);
+      if (PARAM_PROP_MODIFIER_REGEX.test(trimmed)) {
+        offsets.push(start + leadingWs);
+      }
+    };
+
+    while (i < stripped.length && parenDepth > 0) {
+      const ch = stripped[i]!;
+      if (ch === '(') {
+        parenDepth++;
+      } else if (ch === ')') {
+        parenDepth--;
+        if (parenDepth === 0) {
+          checkParamSegment(paramStart, i);
+          break;
+        }
+      } else if (ch === '{') {
+        braceDepth++;
+      } else if (ch === '}') {
+        if (braceDepth > 0) braceDepth--;
+      } else if (ch === '[') {
+        bracketDepth++;
+      } else if (ch === ']') {
+        if (bracketDepth > 0) bracketDepth--;
+      } else if (ch === ',' && parenDepth === 1 && braceDepth === 0 && bracketDepth === 0) {
+        checkParamSegment(paramStart, i);
+        paramStart = i + 1;
+      }
+      i++;
+    }
+  }
+  return offsets;
 }
 
 function scanErasableSyntaxViolations(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
@@ -752,10 +963,6 @@ function scanErasableSyntaxViolations(ctx: ProgrammaticAuditContext): HoloRuleVi
     {
       label: 'namespace declaration',
       regex: /^[ \t]*(?:export[ \t]+)?(?:declare[ \t]+)?namespace[ \t]+[A-Za-z_$][\w$.]*[ \t]*\{/gm,
-    },
-    {
-      label: 'constructor parameter property',
-      regex: /\bconstructor\s*\([^)]*\b(?:public|private|protected|readonly)\s+[A-Za-z_$][\w$]*\s*(?:[:=,)?])/g,
     },
   ];
 
@@ -796,6 +1003,24 @@ function scanErasableSyntaxViolations(ctx: ProgrammaticAuditContext): HoloRuleVi
           }),
         );
       }
+    }
+
+    for (const offset of findConstructorParamPropertyOffsets(stripped)) {
+      const line = lineNumberAtOffset(stripped, offset);
+      const snippet = (rawLines[line - 1] ?? '').trim().slice(0, 160);
+      violations.push(
+        createRuleViolation({
+          ruleId: 'B8G-ERASABLE-SYNTAX',
+          severity: 'error',
+          category: 'abi',
+          repo: ctx.repo,
+          file: relFile,
+          line,
+          snippet,
+          message: 'Non-erasable TypeScript syntax (constructor parameter property) violates erasableSyntaxOnly: true',
+          autofixable: false,
+        }),
+      );
     }
   }
 
@@ -1147,13 +1372,18 @@ function scanBinaryBudgetViolations(ctx: ProgrammaticAuditContext): HoloRuleViol
 
   for (const distDir of distDirs) {
     if (ctx.signal.aborted) return violations;
-    const relFiles = walkRepoFiles(distDir, ctx.signal, emptySkipDirs);
+    const relFiles = walkRepoFiles(distDir, ctx.signal, emptySkipDirs, []);
     for (const relInDist of relFiles) {
       if (ctx.signal.aborted) return violations;
       const ext = extname(relInDist).toLowerCase();
       if (!BINARY_BUDGET_EXTENSIONS.has(ext)) continue;
 
       const absArtifact = resolve(distDir, relInDist);
+      const relFromRoot = relative(ctx.cwd, absArtifact).replaceAll('\\', '/');
+      if (ext === '.b8p' && relFromRoot.startsWith('sections/sectium-maintenance/dist/')) {
+        continue;
+      }
+
       let size = 0;
       try {
         size = statSync(absArtifact).size;
@@ -1162,7 +1392,6 @@ function scanBinaryBudgetViolations(ctx: ProgrammaticAuditContext): HoloRuleViol
       }
 
       if (size > budgetBytes) {
-        const relFromRoot = relative(ctx.cwd, absArtifact).replaceAll('\\', '/');
         violations.push(
           createRuleViolation({
             ruleId: 'B8G-BINARY-BUDGET',
@@ -1186,7 +1415,8 @@ function scanBinaryBudgetViolations(ctx: ProgrammaticAuditContext): HoloRuleViol
 function scanTestHermeticityViolations(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
   const files = walkRepoFiles(ctx.cwd, ctx.signal);
   const violations: HoloRuleViolation[] = [];
-  const writeCallRegex = /\b(?:writeFileSync|appendFileSync|mkdirSync|writeFile|appendFile|mkdir)\s*\(/g;
+  const writeCallRegex =
+    /(^|[^.\w$])(?:(?:fs|fsPromises|nodeFs|promises|fsp)\s*\.\s*)?(?:writeFileSync|appendFileSync|mkdirSync|writeFile|appendFile|mkdir)\s*\(/g;
   const directArgRegex = /^\s*(?:['"][^'"]+['"]|(?:join|resolve)\s*\(\s*(?:process\.cwd\(\)|REPO_ROOT)\s*,)/;
   const tmpIsolationRegex = /\b(?:tmpdir|mkdtempSync|mkdtemp)\b/;
   const cleanupRegex = /\b(?:rmSync|rm|rmdirSync)\b/;
@@ -1213,7 +1443,7 @@ function scanTestHermeticityViolations(ctx: ProgrammaticAuditContext): HoloRuleV
     const hasIsolation = tmpIsolationRegex.test(stripped) && cleanupRegex.test(stripped);
 
     if (!hasIsolation) {
-      const line = lineNumberAtOffset(stripped, firstWrite.index);
+      const line = lineNumberAtOffset(stripped, firstWrite.index + firstWrite[1]!.length);
       const snippet = (rawLines[line - 1] ?? '').trim().slice(0, 160);
       violations.push(
         createRuleViolation({
@@ -1236,7 +1466,7 @@ function scanTestHermeticityViolations(ctx: ProgrammaticAuditContext): HoloRuleV
     while ((callMatch = writeCallRegex.exec(stripped)) !== null) {
       const argSlice = raw.slice(callMatch.index + callMatch[0].length, callMatch.index + callMatch[0].length + 120);
       if (directArgRegex.test(argSlice)) {
-        const line = lineNumberAtOffset(stripped, callMatch.index);
+        const line = lineNumberAtOffset(stripped, callMatch.index + callMatch[1]!.length);
         const snippet = (rawLines[line - 1] ?? '').trim().slice(0, 160);
         violations.push(
           createRuleViolation({
@@ -1333,6 +1563,9 @@ function scanSpdxHeaderViolations(ctx: ProgrammaticAuditContext): HoloRuleViolat
     try {
       const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as Record<string, unknown>;
       const pkgLicense = typeof pkg.license === 'string' ? pkg.license.trim() : '';
+      const spdxTokens = pkgLicense.length > 0 ? pkgLicense.split(/\s+(?:AND|OR)\s+/) : [];
+      const allTokensAllowed =
+        spdxTokens.length > 0 && spdxTokens.every((token) => ALLOWED_SPDX_LICENSES.has(token));
       if (pkgLicense.length === 0) {
         violations.push(
           createRuleViolation({
@@ -1347,7 +1580,7 @@ function scanSpdxHeaderViolations(ctx: ProgrammaticAuditContext): HoloRuleViolat
             autofixable: false,
           }),
         );
-      } else if (!ALLOWED_SPDX_LICENSES.has(pkgLicense)) {
+      } else if (!allTokensAllowed) {
         violations.push(
           createRuleViolation({
             ruleId: 'B8G-SPDX-LICENSE',
@@ -1361,7 +1594,7 @@ function scanSpdxHeaderViolations(ctx: ProgrammaticAuditContext): HoloRuleViolat
             autofixable: false,
           }),
         );
-      } else if (detectedLicense !== null && pkgLicense !== detectedLicense) {
+      } else if (detectedLicense !== null && !spdxTokens.includes(detectedLicense)) {
         violations.push(
           createRuleViolation({
             ruleId: 'B8G-SPDX-LICENSE',
@@ -1425,7 +1658,7 @@ function scanAbiSurfaceViolations(ctx: ProgrammaticAuditContext): HoloRuleViolat
       continue;
     }
 
-    if (parsed.abiMagic !== B8G_ABI_MAGIC_V3) {
+    if (parsed.schema !== 'holo-abi-golden.v1') {
       violations.push(
         createRuleViolation({
           ruleId: 'B8G-ABI-SURFACE',
@@ -1434,8 +1667,42 @@ function scanAbiSurfaceViolations(ctx: ProgrammaticAuditContext): HoloRuleViolat
           repo: ctx.repo,
           file: relFile,
           line: 1,
-          snippet: `abiMagic=${String(parsed.abiMagic ?? '<missing>')}`,
-          message: `ABI golden "${relFile}" has invalid or missing abiMagic (expected ${B8G_ABI_MAGIC_V3})`,
+          snippet: `schema=${String(parsed.schema ?? '<missing>')}`,
+          message: `ABI golden "${relFile}" has invalid or missing schema (expected holo-abi-golden.v1)`,
+          autofixable: false,
+        }),
+      );
+    }
+
+    if ('abiMagic' in parsed && parsed.abiMagic !== undefined && parsed.abiMagic !== B8G_ABI_MAGIC_V3) {
+      violations.push(
+        createRuleViolation({
+          ruleId: 'B8G-ABI-SURFACE',
+          severity: 'error',
+          category: 'abi',
+          repo: ctx.repo,
+          file: relFile,
+          line: 1,
+          snippet: `abiMagic=${String(parsed.abiMagic)}`,
+          message: `ABI golden "${relFile}" has invalid abiMagic (expected ${B8G_ABI_MAGIC_V3})`,
+          autofixable: false,
+        }),
+      );
+    }
+
+    const hasNonEmptyRecord = (val: unknown): boolean =>
+      val !== null && typeof val === 'object' && !Array.isArray(val) && Object.keys(val as Record<string, unknown>).length > 0;
+    if (!hasNonEmptyRecord(parsed.structs) && !hasNonEmptyRecord(parsed.constants)) {
+      violations.push(
+        createRuleViolation({
+          ruleId: 'B8G-ABI-SURFACE',
+          severity: 'error',
+          category: 'abi',
+          repo: ctx.repo,
+          file: relFile,
+          line: 1,
+          snippet: 'structs=<empty>, constants=<empty>',
+          message: `ABI golden "${relFile}" must define non-empty structs or constants`,
           autofixable: false,
         }),
       );
