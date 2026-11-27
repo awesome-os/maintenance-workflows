@@ -112,7 +112,7 @@ function seedCleanRepo(dir: string): void {
 }
 
 describe('holo-ci programmatic audit-stack registry', () => {
-  it('supports register(), list(), get(), remove(), custom audits, and 5 built-in holo-ci audits', async () => {
+  it('supports register(), list(), get(), remove(), custom audits, and 8 built-in holo-ci audits', async () => {
     const reg = createAuditStackRegistry();
     assert.equal(reg.list().length, 0);
 
@@ -121,7 +121,7 @@ describe('holo-ci programmatic audit-stack registry', () => {
       reg.list().map((a) => a.id),
       [...BUILTIN_HOLO_CI_AUDIT_IDS],
     );
-    assert.equal(reg.list().length, 5);
+    assert.equal(reg.list().length, 8);
 
     const customAudit: ProgrammaticAuditSpec = {
       id: 'custom/zero-todo',
@@ -137,7 +137,7 @@ describe('holo-ci programmatic audit-stack registry', () => {
       },
     };
     reg.register(customAudit);
-    assert.equal(reg.list().length, 6);
+    assert.equal(reg.list().length, 9);
     assert.equal(reg.get('custom/zero-todo')?.title, 'Custom Zero TODO Marker Audit');
 
     const dir = makeTempDir();
@@ -153,8 +153,8 @@ describe('holo-ci programmatic audit-stack registry', () => {
       assert.equal(res.ok, true, JSON.stringify(res.violations));
       assert.equal(res.ratified, true);
       assert.equal(res.failedFast, false);
-      assert.equal(res.totalAudits, 6);
-      assert.equal(res.passedAudits, 6);
+      assert.equal(res.totalAudits, 9);
+      assert.equal(res.passedAudits, 9);
       assert.equal(res.failedAudits, 0);
       assert.equal(res.abortedAudits, 0);
       assert.equal(res.violationCount, 0);
@@ -164,7 +164,7 @@ describe('holo-ci programmatic audit-stack registry', () => {
 
       assert.equal(reg.remove('custom/zero-todo'), true);
       assert.equal(reg.remove('custom/non-existent'), false);
-      assert.equal(reg.list().length, 5);
+      assert.equal(reg.list().length, 8);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -451,7 +451,7 @@ describe('holo-ci programmatic audit-stack registry', () => {
     }
   });
 
-  it('triggers all 5 built-in holo-ci audits simultaneously on a dirty repo in exhaust mode', async () => {
+  it('triggers all 8 built-in holo-ci audits simultaneously on a dirty repo in exhaust mode', async () => {
     const dir = makeTempDir('holo-audit-dirty-');
     try {
       mkdirSync(join(dir, '.github', 'workflows'), { recursive: true });
@@ -460,6 +460,7 @@ describe('holo-ci programmatic audit-stack registry', () => {
       const badGhost = ['b8g', 'ghost'].join('-');
       const badCasV1 = ['cas', 'v1'].join('-');
       const badHttp = ['http', '://', '127.0.0.1:9999'].join('');
+      const badToken = ['ghp', 'dirtyrepo1234567890'].join('_');
 
       // Missing LICENSE, .gitattributes, CODEOWNERS -> holo-ci/governance fails
       // Unhardened workflow + guard tokens -> holo-ci/wf-harden + holo-ci/guards fail
@@ -480,6 +481,8 @@ describe('holo-ci programmatic audit-stack registry', () => {
       );
 
       // Boundary violation -> holo-ci/boundary fails
+      // Non-erasable enum -> holo-ci/erasable-syntax fails
+      // Leaked token -> holo-ci/secret-scan fails
       writeFileSync(
         join(dir, 'boundary.json'),
         JSON.stringify(
@@ -497,9 +500,18 @@ describe('holo-ci programmatic audit-stack registry', () => {
       );
       writeFileSync(
         join(dir, 'src', 'bad.mts'),
-        "import { x } from 'forbidden-layer';\nexport const val = x;\n",
+        [
+          "import { x } from 'forbidden-layer';",
+          'export enum BadMode { Off = 0 }',
+          `export const leaked = '${badToken}';`,
+          'export const val = x;',
+          '',
+        ].join('\n'),
         'utf8',
       );
+
+      // Broken local link -> holo-ci/no-broken-local-links fails
+      writeFileSync(join(dir, 'README.md'), '# Dirty Repo\n\nSee [Missing](./docs/does-not-exist.md).\n', 'utf8');
 
       // Custom CNAME -> holo-ci/non-github-io-cname fails
       writeFileSync(join(dir, 'CNAME'), 'legacy.example.org\n', 'utf8');
@@ -513,9 +525,9 @@ describe('holo-ci programmatic audit-stack registry', () => {
       assert.equal(res.ok, false);
       assert.equal(res.ratified, false);
       assert.equal(res.failedFast, false);
-      assert.equal(res.totalAudits, 5);
+      assert.equal(res.totalAudits, 8);
       assert.equal(res.passedAudits, 0);
-      assert.equal(res.failedAudits, 5);
+      assert.equal(res.failedAudits, 8);
       assert.equal(res.abortedAudits, 0);
 
       for (const id of BUILTIN_HOLO_CI_AUDIT_IDS) {
@@ -589,7 +601,7 @@ describe('holo-ci programmatic audit-stack registry', () => {
       assert.equal(passReceipt.phase, 'audit-stack');
       assert.equal(passReceipt.ok, true);
       assert.equal(passReceipt.auditStack?.ratified, true);
-      assert.equal(passReceipt.auditStack?.passedAudits, 5);
+      assert.equal(passReceipt.auditStack?.passedAudits, 8);
       assert.equal(existsSync(passPushPath), true);
 
       // 2. Failing run on temp repo with custom CNAME returns non-zero exit code + telemetry + push file
@@ -649,6 +661,209 @@ describe('holo-ci programmatic audit-stack registry', () => {
       assert.match(badModeRes.stderr, /Invalid --mode/);
     } finally {
       rmSync(outDir, { recursive: true, force: true });
+    }
+  });
+
+  it('holo-ci/erasable-syntax detects enum, namespace, and constructor parameter properties while ignoring comments/strings/skipDirs', async () => {
+    const dir = makeTempDir('holo-audit-erasable-');
+    try {
+      seedCleanRepo(dir);
+
+      // Positive cases in src/non-erasable.ts
+      writeFileSync(
+        join(dir, 'src', 'non-erasable.ts'),
+        [
+          'export enum Status {',
+          '  Ok = 1,',
+          '}',
+          'namespace Internal {',
+          '  export const v = 1;',
+          '}',
+          'export class Box {',
+          '  constructor(private readonly id: string) {}',
+          '}',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+
+      // Negative cases: skipped directories, .d.ts, comments, string literals, and clean erasable TS
+      mkdirSync(join(dir, 'node_modules', 'pkg'), { recursive: true });
+      mkdirSync(join(dir, 'dist'), { recursive: true });
+      writeFileSync(join(dir, 'node_modules', 'pkg', 'index.ts'), 'export enum Ignored { A = 1 }\n', 'utf8');
+      writeFileSync(join(dir, 'dist', 'out.ts'), 'export enum BuiltIgnored { A = 1 }\n', 'utf8');
+      writeFileSync(join(dir, 'src', 'types.d.ts'), 'export declare enum AmbientOk { A = 1 }\n', 'utf8');
+      writeFileSync(
+        join(dir, 'src', 'clean.mts'),
+        [
+          '// enum CommentEnum { A = 1 }',
+          '/* namespace CommentNs { export const x = 1; } */',
+          "export const example = 'enum StringEnum { A = 1 }';",
+          'export const Status = { Ok: 1 } as const;',
+          'export class CleanBox {',
+          '  readonly id: string;',
+          '  constructor(id: string) { this.id = id; }',
+          '}',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const failRes = await runBuiltinAuditStack({
+        cwd: dir,
+        repo: 'awesome-os/erasable-test',
+        mode: 'exhaust',
+        onlyIds: ['holo-ci/erasable-syntax'],
+      });
+      assert.equal(failRes.ok, false);
+      assert.equal(failRes.failedAudits, 1);
+      assert.equal(failRes.violationCount, 3);
+      for (const v of failRes.violations) {
+        assert.equal(v.schema, HOLO_RULE_VIOLATION_SCHEMA);
+        assert.equal(v.ruleId, 'B8G-ERASABLE-SYNTAX');
+        assert.equal(v.category, 'abi');
+        assert.equal(v.file, 'src/non-erasable.ts');
+        assert.match(v.fingerprint, /^[0-9a-f]{16}$/);
+      }
+
+      rmSync(join(dir, 'src', 'non-erasable.ts'));
+      const passRes = await runBuiltinAuditStack({
+        cwd: dir,
+        repo: 'awesome-os/erasable-test',
+        mode: 'exhaust',
+        onlyIds: ['holo-ci/erasable-syntax'],
+      });
+      assert.equal(passRes.ok, true);
+      assert.equal(passRes.violationCount, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('holo-ci/secret-scan detects leaked token prefixes and private keys while honoring allow/fixture markers', async () => {
+    const dir = makeTempDir('holo-audit-secret-');
+    try {
+      seedCleanRepo(dir);
+
+      const ghpToken = ['ghp', '1234567890abcdef'].join('_');
+      const patToken = ['github', 'pat', '11AAAAAA00000000'].join('_');
+      const aizaToken = ['AIza', 'SyDummyKey1234567890'].join('');
+      const akiaToken = ['AKIA', 'IOSFODNN7EXAMPLE12'].join('');
+      const pemHeader = ['-----BEGIN ', 'RSA PRIVATE KEY-----'].join('');
+
+      writeFileSync(
+        join(dir, 'src', 'leaked.mts'),
+        [
+          `export const a = '${ghpToken}';`,
+          `export const b = '${patToken}';`,
+          `export const c = '${aizaToken}';`,
+          `export const d = '${akiaToken}';`,
+          `export const e = '${pemHeader}';`,
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+
+      // Negative cases: allow-secret marker, test-fixture marker, and skipped directories
+      writeFileSync(
+        join(dir, 'src', 'allowed.mts'),
+        [
+          `export const allowed = '${ghpToken}'; // holo-ci-allow-secret`,
+          `export const fixture = '${akiaToken}'; // holo-ci-test-fixture`,
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+      mkdirSync(join(dir, '.holo-ci-runtime'), { recursive: true });
+      writeFileSync(join(dir, '.holo-ci-runtime', 'cache.txt'), `${ghpToken}\n`, 'utf8');
+
+      const failRes = await runBuiltinAuditStack({
+        cwd: dir,
+        repo: 'awesome-os/secret-test',
+        mode: 'exhaust',
+        onlyIds: ['holo-ci/secret-scan'],
+      });
+      assert.equal(failRes.ok, false);
+      assert.equal(failRes.failedAudits, 1);
+      assert.equal(failRes.violationCount, 5);
+      for (const v of failRes.violations) {
+        assert.equal(v.schema, HOLO_RULE_VIOLATION_SCHEMA);
+        assert.equal(v.ruleId, 'B8G-SECRET-SCAN');
+        assert.equal(v.category, 'security');
+        assert.equal(v.file, 'src/leaked.mts');
+        assert.match(v.snippet, /\*\*\*REDACTED\*\*\*/);
+        assert.match(v.fingerprint, /^[0-9a-f]{16}$/);
+      }
+
+      rmSync(join(dir, 'src', 'leaked.mts'));
+      const passRes = await runBuiltinAuditStack({
+        cwd: dir,
+        repo: 'awesome-os/secret-test',
+        mode: 'exhaust',
+        onlyIds: ['holo-ci/secret-scan'],
+      });
+      assert.equal(passRes.ok, true);
+      assert.equal(passRes.violationCount, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('holo-ci/no-broken-local-links catches missing relative links in README.md and docs/*.md and allows valid/fenced links', async () => {
+    const dir = makeTempDir('holo-audit-links-');
+    try {
+      seedCleanRepo(dir);
+      mkdirSync(join(dir, 'docs'), { recursive: true });
+      writeFileSync(join(dir, 'docs', 'guide.md'), '# Guide\n\nBack to [Root](../README.md#top) or [Missing](../nope.md).\n', 'utf8');
+      writeFileSync(
+        join(dir, 'README.md'),
+        [
+          '# Clean Repo',
+          '',
+          'Valid: [Guide](./docs/guide.md?raw=1#intro) and [External](https://awesome-os.github.io/).',
+          'Inline code ignored: `[Ghost](./ghost.md)`.',
+          '```markdown',
+          '[FencedGhost](./fenced-ghost.md)',
+          '```',
+          'Broken: [Missing](./docs/missing.md).',
+          '',
+        ].join('\n'),
+        'utf8',
+      );
+
+      const failRes = await runBuiltinAuditStack({
+        cwd: dir,
+        repo: 'awesome-os/links-test',
+        mode: 'exhaust',
+        onlyIds: ['holo-ci/no-broken-local-links'],
+      });
+      assert.equal(failRes.ok, false);
+      assert.equal(failRes.failedAudits, 1);
+      assert.equal(failRes.violationCount, 2);
+      assert.deepEqual(
+        failRes.violations.map((v) => v.file).sort(),
+        ['README.md', 'docs/guide.md'],
+      );
+      for (const v of failRes.violations) {
+        assert.equal(v.schema, HOLO_RULE_VIOLATION_SCHEMA);
+        assert.equal(v.ruleId, 'B8G-BROKEN-LOCAL-LINK');
+        assert.equal(v.category, 'docs');
+        assert.match(v.fingerprint, /^[0-9a-f]{16}$/);
+      }
+
+      // Fix both broken links -> passes
+      writeFileSync(join(dir, 'docs', 'guide.md'), '# Guide\n\nBack to [Root](../README.md#top).\n', 'utf8');
+      writeFileSync(join(dir, 'README.md'), '# Clean Repo\n\nValid: [Guide](./docs/guide.md#intro).\n', 'utf8');
+      const passRes = await runBuiltinAuditStack({
+        cwd: dir,
+        repo: 'awesome-os/links-test',
+        mode: 'exhaust',
+        onlyIds: ['holo-ci/no-broken-local-links'],
+      });
+      assert.equal(passRes.ok, true);
+      assert.equal(passRes.violationCount, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

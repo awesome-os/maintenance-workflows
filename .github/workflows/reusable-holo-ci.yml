@@ -101,6 +101,11 @@ jobs:
               CLI_EXIT="${DOC_SYNC_EXIT}"
             fi
           fi
+          if [ "${{ inputs.phase }}" = "verify" ]; then
+            node "${{ github.workspace }}/.holo-ci-runtime/holo-ci/cli.mts" audit-stack --cwd . --mode exhaust --emit-summary --out "${{ github.workspace }}/b8g-audit-push.json" --receipt "${{ github.workspace }}/holo-ci-receipt.ndjson"
+            AUDIT_EXIT=$?
+            [ "${AUDIT_EXIT}" -ne 0 ] && CLI_EXIT="${AUDIT_EXIT}"
+          fi
           set -e
           BUMPED=$(node -e '
             const fs = require("node:fs");
@@ -127,6 +132,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: holo-ci-receipt-${{ inputs.phase }}
-          path: holo-ci-receipt.ndjson
+          path: |
+            holo-ci-receipt.ndjson
+            ${{ github.workspace }}/b8g-audit-push.json
           retention-days: 7
           if-no-files-found: warn

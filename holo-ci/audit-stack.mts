@@ -10,8 +10,8 @@
  * Strictly `erasableSyntaxOnly: true`, zero external npm dependencies, zero loopback HTTP IPC.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, dirname, resolve } from 'node:path';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, extname, relative, resolve } from 'node:path';
 import { runBoundaryAudit } from './boundary.mts';
 import {
   B8G_ABI_MAGIC_V3,
@@ -36,6 +36,9 @@ export const BUILTIN_HOLO_CI_AUDIT_IDS = [
   'holo-ci/boundary',
   'holo-ci/guards',
   'holo-ci/non-github-io-cname',
+  'holo-ci/erasable-syntax',
+  'holo-ci/secret-scan',
+  'holo-ci/no-broken-local-links',
 ] as const;
 
 export type AuditStackMode = 'fail-fast' | 'exhaust';
@@ -570,13 +573,362 @@ export function createAuditStackRegistry(): AuditStackRegistry {
   return registry;
 }
 
+const DEFAULT_SCAN_SKIP_DIRS = new Set([
+  'node_modules',
+  '.git',
+  'dist',
+  'build',
+  '.holo-ci-runtime',
+]);
+
+const BINARY_SCAN_EXTENSIONS = new Set([
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.ico',
+  '.webp',
+  '.woff',
+  '.woff2',
+  '.ttf',
+  '.eot',
+  '.wasm',
+  '.exe',
+  '.dll',
+  '.so',
+  '.dylib',
+  '.zip',
+  '.tar',
+  '.gz',
+  '.7z',
+  '.b8p',
+  '.b8e',
+  '.pdf',
+  '.bin',
+  '.lockb',
+]);
+
+const MAX_SCAN_FILE_BYTES = 2 * 1024 * 1024;
+
+function walkRepoFiles(
+  rootDir: string,
+  signal?: AbortSignal,
+  skipDirs: ReadonlySet<string> = DEFAULT_SCAN_SKIP_DIRS,
+): string[] {
+  if (!existsSync(rootDir)) return [];
+  const results: string[] = [];
+
+  const visit = (dir: string): void => {
+    if (signal?.aborted) return;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (signal?.aborted) return;
+      const fullPath = resolve(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (skipDirs.has(entry.name)) continue;
+        visit(fullPath);
+      } else if (entry.isFile()) {
+        results.push(relative(rootDir, fullPath).replaceAll('\\', '/'));
+      }
+    }
+  };
+
+  visit(rootDir);
+  return results;
+}
+
 /**
- * Registers the 5 canonical built-in `holo-ci` programmatic audits into `registry`:
+ * Replaces comments (`//`, `/* * /`) and string/template literals with spaces while
+ * preserving newlines so 1-based line numbers remain exact.
+ */
+function stripTsCommentsAndStrings(source: string): string {
+  const out: string[] = [];
+  let i = 0;
+  const len = source.length;
+  while (i < len) {
+    const ch = source[i]!;
+    const next = i + 1 < len ? source[i + 1]! : '';
+
+    if (ch === '/' && next === '/') {
+      out.push('  ');
+      i += 2;
+      while (i < len && source[i] !== '\n') {
+        out.push(' ');
+        i++;
+      }
+      continue;
+    }
+
+    if (ch === '/' && next === '*') {
+      out.push('  ');
+      i += 2;
+      while (i < len) {
+        if (source[i] === '*' && i + 1 < len && source[i + 1] === '/') {
+          out.push('  ');
+          i += 2;
+          break;
+        }
+        out.push(source[i] === '\n' ? '\n' : ' ');
+        i++;
+      }
+      continue;
+    }
+
+    if (ch === '\'' || ch === '"' || ch === '`') {
+      const quote = ch;
+      out.push(' ');
+      i++;
+      while (i < len) {
+        const cur = source[i]!;
+        if (cur === '\\' && i + 1 < len) {
+          out.push(' ');
+          out.push(source[i + 1] === '\n' ? '\n' : ' ');
+          i += 2;
+          continue;
+        }
+        if (cur === quote) {
+          out.push(' ');
+          i++;
+          break;
+        }
+        out.push(cur === '\n' ? '\n' : ' ');
+        i++;
+      }
+      continue;
+    }
+
+    out.push(ch);
+    i++;
+  }
+  return out.join('');
+}
+
+function lineNumberAtOffset(text: string, offset: number): number {
+  let line = 1;
+  for (let i = 0; i < offset && i < text.length; i++) {
+    if (text[i] === '\n') line++;
+  }
+  return line;
+}
+
+function scanErasableSyntaxViolations(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
+  const files = walkRepoFiles(ctx.cwd, ctx.signal);
+  const violations: HoloRuleViolation[] = [];
+
+  const rules: ReadonlyArray<{ label: string; regex: RegExp }> = [
+    {
+      label: 'enum declaration',
+      regex: /^[ \t]*(?:export[ \t]+)?(?:const[ \t]+)?enum[ \t]+[A-Za-z_$][\w$]*[ \t]*\{/gm,
+    },
+    {
+      label: 'namespace declaration',
+      regex: /^[ \t]*(?:export[ \t]+)?(?:declare[ \t]+)?namespace[ \t]+[A-Za-z_$][\w$.]*[ \t]*\{/gm,
+    },
+    {
+      label: 'constructor parameter property',
+      regex: /\bconstructor\s*\([^)]*\b(?:public|private|protected|readonly)\s+[A-Za-z_$][\w$]*\s*(?:[:=,)?])/g,
+    },
+  ];
+
+  for (const relFile of files) {
+    if (ctx.signal.aborted) return violations;
+    if (!relFile.endsWith('.mts') && !relFile.endsWith('.ts')) continue;
+    if (relFile.endsWith('.d.mts') || relFile.endsWith('.d.ts')) continue;
+
+    const absFile = resolve(ctx.cwd, relFile);
+    let raw: string;
+    try {
+      if (statSync(absFile).size > MAX_SCAN_FILE_BYTES) continue;
+      raw = readFileSync(absFile, 'utf8');
+    } catch {
+      continue;
+    }
+
+    const stripped = stripTsCommentsAndStrings(raw);
+    const rawLines = raw.split(/\r?\n/);
+
+    for (const rule of rules) {
+      rule.regex.lastIndex = 0;
+      let match: RegExpExecArray | null;
+      while ((match = rule.regex.exec(stripped)) !== null) {
+        const line = lineNumberAtOffset(stripped, match.index);
+        const snippet = (rawLines[line - 1] ?? '').trim().slice(0, 160);
+        violations.push(
+          createRuleViolation({
+            ruleId: 'B8G-ERASABLE-SYNTAX',
+            severity: 'error',
+            category: 'abi',
+            repo: ctx.repo,
+            file: relFile,
+            line,
+            snippet,
+            message: `Non-erasable TypeScript syntax (${rule.label}) violates erasableSyntaxOnly: true`,
+            autofixable: false,
+          }),
+        );
+      }
+    }
+  }
+
+  return violations;
+}
+
+function redactSecretSnippet(line: string, match: RegExpExecArray): string {
+  const token = match[0];
+  const prefix = token.slice(0, Math.min(6, token.length));
+  const redacted = `${prefix}***REDACTED***`;
+  const before = line.slice(0, match.index);
+  const after = line.slice(match.index + token.length);
+  return `${before}${redacted}${after}`.trim().slice(0, 160);
+}
+
+function scanSecretViolations(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
+  const files = walkRepoFiles(ctx.cwd, ctx.signal);
+  const violations: HoloRuleViolation[] = [];
+
+  const secretPatterns: ReadonlyArray<{ label: string; regex: RegExp }> = [
+    { label: 'GitHub classic personal access token (ghp_)', regex: /\bghp_[A-Za-z0-9_]{8,}/ },
+    { label: 'GitHub fine-grained PAT (github_pat_)', regex: /\bgithub_pat_[A-Za-z0-9_]{8,}/ },
+    { label: 'Google API key (AIza)', regex: /\bAIza[0-9A-Za-z_-]{12,}/ },
+    { label: 'AWS access key ID (AKIA)', regex: /\bAKIA[0-9A-Z]{12,}/ },
+    { label: 'Private key PEM header', regex: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/ },
+  ];
+
+  for (const relFile of files) {
+    if (ctx.signal.aborted) return violations;
+    if (BINARY_SCAN_EXTENSIONS.has(extname(relFile).toLowerCase())) continue;
+
+    const absFile = resolve(ctx.cwd, relFile);
+    let raw: string;
+    try {
+      if (statSync(absFile).size > MAX_SCAN_FILE_BYTES) continue;
+      raw = readFileSync(absFile, 'utf8');
+    } catch {
+      continue;
+    }
+
+    if (raw.includes('\0')) continue;
+    const lines = raw.split(/\r?\n/);
+    const header = lines.slice(0, 5).join('\n');
+    if (header.includes('holo-ci-allow-secret') || header.includes('holo-ci-test-fixture')) {
+      continue;
+    }
+
+    for (let idx = 0; idx < lines.length; idx++) {
+      const line = lines[idx]!;
+      if (line.includes('holo-ci-allow-secret') || line.includes('holo-ci-test-fixture')) {
+        continue;
+      }
+      for (const pattern of secretPatterns) {
+        const match = pattern.regex.exec(line);
+        if (!match) continue;
+        violations.push(
+          createRuleViolation({
+            ruleId: 'B8G-SECRET-SCAN',
+            severity: 'error',
+            category: 'security',
+            repo: ctx.repo,
+            file: relFile,
+            line: idx + 1,
+            snippet: redactSecretSnippet(line, match),
+            message: `High-confidence ${pattern.label} detected; remove secret or mark intentional fixtures with holo-ci-allow-secret`,
+            autofixable: false,
+          }),
+        );
+      }
+    }
+  }
+
+  return violations;
+}
+
+function scanBrokenLocalLinkViolations(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
+  const mdRelPaths: string[] = [];
+  if (existsSync(resolve(ctx.cwd, 'README.md'))) {
+    mdRelPaths.push('README.md');
+  }
+  const docsDir = resolve(ctx.cwd, 'docs');
+  if (existsSync(docsDir)) {
+    const docFiles = walkRepoFiles(docsDir, ctx.signal);
+    for (const relDoc of docFiles) {
+      if (relDoc.toLowerCase().endsWith('.md')) {
+        mdRelPaths.push(`docs/${relDoc}`);
+      }
+    }
+  }
+
+  const violations: HoloRuleViolation[] = [];
+  const linkRegex = /\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+
+  for (const relMd of mdRelPaths) {
+    if (ctx.signal.aborted) return violations;
+    const absMd = resolve(ctx.cwd, relMd);
+    let raw: string;
+    try {
+      raw = readFileSync(absMd, 'utf8');
+    } catch {
+      continue;
+    }
+
+    const lines = raw.split(/\r?\n/);
+    let inFence = false;
+    for (let idx = 0; idx < lines.length; idx++) {
+      const line = lines[idx]!;
+      const trimmed = line.trimStart();
+      if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
+        inFence = !inFence;
+        continue;
+      }
+      if (inFence) continue;
+
+      const withoutInlineCode = line.replace(/`[^`]*`/g, '');
+      linkRegex.lastIndex = 0;
+      let match: RegExpExecArray | null;
+      while ((match = linkRegex.exec(withoutInlineCode)) !== null) {
+        const rawTarget = match[1]!;
+        if (!rawTarget.startsWith('./') && !rawTarget.startsWith('../')) continue;
+        const cleanTarget = rawTarget.split('#')[0]!.split('?')[0]!;
+        if (cleanTarget.length === 0) continue;
+
+        const resolvedTarget = resolve(dirname(absMd), cleanTarget);
+        if (!existsSync(resolvedTarget)) {
+          violations.push(
+            createRuleViolation({
+              ruleId: 'B8G-BROKEN-LOCAL-LINK',
+              severity: 'error',
+              category: 'docs',
+              repo: ctx.repo,
+              file: relMd,
+              line: idx + 1,
+              snippet: rawTarget.slice(0, 160),
+              message: `Broken local relative markdown link "${rawTarget}" (target does not exist on disk)`,
+              autofixable: false,
+            }),
+          );
+        }
+      }
+    }
+  }
+
+  return violations;
+}
+
+/**
+ * Registers the 8 canonical built-in `holo-ci` programmatic audits into `registry`:
  *   1. `holo-ci/wf-harden` — GitHub Actions workflow hardening check
  *   2. `holo-ci/governance` — SPDX LICENSE, CODEOWNERS, .gitattributes, badges & workflow bloat
  *   3. `holo-ci/boundary` — Chromium-style boundary/DAG/B8G016 check when `boundary.json` exists
  *   4. `holo-ci/guards` — `zeroGhost`, `zeroCasV1`, and `zeroHttpIpc` (`B8G016`) guards
  *   5. `holo-ci/non-github-io-cname` — Rejects non-`awesome-os.github.io` custom `CNAME` files
+ *   6. `holo-ci/erasable-syntax` — Rejects non-erasable TypeScript syntax (`enum`, `namespace`, parameter properties)
+ *   7. `holo-ci/secret-scan` — Detects high-confidence leaked token prefixes & private keys
+ *   8. `holo-ci/no-broken-local-links` — Detects broken relative file links in `README.md` and `docs/*.md`
  */
 export function registerBuiltinHoloCiAudits(registry: AuditStackRegistry): AuditStackRegistry {
   registry.register({
@@ -709,11 +1061,50 @@ export function registerBuiltinHoloCiAudits(registry: AuditStackRegistry): Audit
     },
   });
 
+  registry.register({
+    id: 'holo-ci/erasable-syntax',
+    title: 'Non-Erasable TypeScript Syntax Guard (erasableSyntaxOnly)',
+    category: 'abi',
+    severity: 'error',
+    rollbackHint: 'Replace enum, namespace, and constructor parameter properties with erasable TypeScript syntax',
+    remediationCmd: 'holo-ci audit-stack --only holo-ci/erasable-syntax',
+    run(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
+      if (ctx.signal.aborted) return [];
+      return scanErasableSyntaxViolations(ctx);
+    },
+  });
+
+  registry.register({
+    id: 'holo-ci/secret-scan',
+    title: 'High-Confidence Secret & Private Key Scanner',
+    category: 'security',
+    severity: 'error',
+    rollbackHint: 'Revoke leaked credential, purge from history, and rotate secret immediately',
+    remediationCmd: 'holo-ci audit-stack --only holo-ci/secret-scan',
+    run(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
+      if (ctx.signal.aborted) return [];
+      return scanSecretViolations(ctx);
+    },
+  });
+
+  registry.register({
+    id: 'holo-ci/no-broken-local-links',
+    title: 'Documentation Local Relative Link Hygiene',
+    category: 'docs',
+    severity: 'error',
+    rollbackHint: 'Fix broken relative markdown link or restore missing target file',
+    remediationCmd: 'holo-ci audit-stack --only holo-ci/no-broken-local-links',
+    run(ctx: ProgrammaticAuditContext): HoloRuleViolation[] {
+      if (ctx.signal.aborted) return [];
+      return scanBrokenLocalLinkViolations(ctx);
+    },
+  });
+
   return registry;
 }
 
 /**
- * Convenience runner that creates a registry with all 5 built-in `holo-ci` audits and executes it.
+ * Convenience runner that creates a registry with all 8 built-in `holo-ci` audits and executes it.
  */
 export async function runBuiltinAuditStack(
   options: AuditStackRunOptions = {},
