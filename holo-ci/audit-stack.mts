@@ -583,7 +583,25 @@ const DEFAULT_SCAN_SKIP_DIRS = new Set([
   '.git',
   'dist',
   'build',
+  'target',
+  'out',
+  'archive',
+  'third_party',
+  'deps',
+  'v8',
+  'v8_monolith',
+  'github-mirror',
+  'github-releases-mirror',
+  'repository',
+  't2-release',
+  '.b8g-cas',
+  '.awesome-oci',
+  '.tmp-snapshots',
+  'models',
+  'electron-docs',
+  'fdir',
   '.holo-ci-runtime',
+  'Apps',
 ]);
 
 const BINARY_SCAN_EXTENSIONS = new Set([
@@ -819,6 +837,15 @@ function scanSecretViolations(ctx: ProgrammaticAuditContext): HoloRuleViolation[
     }
 
     if (raw.includes('\0')) continue;
+    if (
+      !raw.includes('ghp_') &&
+      !raw.includes('github_pat_') &&
+      !raw.includes('AIza') &&
+      !raw.includes('AKIA') &&
+      !raw.includes('PRIVATE KEY-----')
+    ) {
+      continue;
+    }
     const lines = raw.split(/\r?\n/);
     const header = lines.slice(0, 5).join('\n');
     if (header.includes('holo-ci-allow-secret') || header.includes('holo-ci-test-fixture')) {

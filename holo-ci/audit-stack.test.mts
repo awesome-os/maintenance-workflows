@@ -1125,4 +1125,53 @@ describe('holo-ci programmatic audit-stack registry', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('skips heavy monorepo/vendor/mirror/CAS directories (third_party/, v8/, github-mirror/, node_modules/) cleanly', async () => {
+    const dir = makeTempDir('holo-audit-skip-dirs-');
+    try {
+      seedCleanRepo(dir);
+      const skippedDirs = ['third_party', 'v8', 'github-mirror', 'node_modules'];
+      for (const skipDir of skippedDirs) {
+        const base = join(dir, skipDir, 'nested');
+        mkdirSync(base, { recursive: true });
+        writeFileSync(join(base, 'bad.mts'), 'export enum BadEnum { A = 1 }\n', 'utf8');
+        writeFileSync(join(base, 'secret.ts'), `export const tok = "${'ghp_'}1234567890abcdefghij1234567890abcd";\n`, 'utf8');
+        writeFileSync(join(base, 'index.mts'), 'export { missing } from "./nonexistent.mts";\n', 'utf8');
+        writeFileSync(
+          join(base, 'bad.test.mts'),
+          'import { writeFileSync } from "node:fs";\nwriteFileSync("leaked.txt", "x");\n',
+          'utf8',
+        );
+        writeFileSync(
+          join(base, 'abi-golden.json'),
+          JSON.stringify({ abiMagic: '0xDEADBEEF', header: 'missing.h' }),
+          'utf8',
+        );
+      }
+
+      const docsSkipped = join(dir, 'docs', 'third_party');
+      mkdirSync(docsSkipped, { recursive: true });
+      writeFileSync(join(docsSkipped, 'broken.md'), '[broken](./does-not-exist.md)\n', 'utf8');
+
+      const res = await runBuiltinAuditStack({
+        cwd: dir,
+        repo: 'awesome-os/skip-dirs-test',
+        mode: 'exhaust',
+        onlyIds: [
+          'holo-ci/erasable-syntax',
+          'holo-ci/secret-scan',
+          'holo-ci/no-broken-local-links',
+          'holo-ci/dead-exports',
+          'holo-ci/test-hermeticity',
+          'holo-ci/abi-surface',
+        ],
+      });
+      assert.equal(res.ok, true);
+      assert.equal(res.passedAudits, 6);
+      assert.equal(res.failedAudits, 0);
+      assert.equal(res.violationCount, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
