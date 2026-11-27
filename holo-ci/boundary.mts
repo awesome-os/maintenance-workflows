@@ -242,7 +242,15 @@ function evaluateAbiContract(
           const headerRel = goldenObj.header.trim();
           const headerFull = resolve(cwd, headerRel);
           const headerRelativeToManifest = resolve(fullPath, '..', headerRel);
-          if (!existsSync(headerFull) && !existsSync(headerRelativeToManifest)) {
+          const headerProjectedSibling =
+            headerRel.includes('/') || headerRel.includes('\\')
+              ? resolve(fullPath, '..', basename(headerRel))
+              : headerRelativeToManifest;
+          if (
+            !existsSync(headerFull) &&
+            !existsSync(headerRelativeToManifest) &&
+            !existsSync(headerProjectedSibling)
+          ) {
             violations.push({
               rule: 'abiGolden',
               file: normRel,

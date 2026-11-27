@@ -2074,6 +2074,27 @@ describe('holo-ci boundary-audit', () => {
         ['httpIpc', 'abiGolden'],
       );
       assert.match(res.violations[1]!.message, /missing header/);
+
+      // Projected co-located header (e.g. devtools/ide/game-engines/b8g-graphics/b8g_graphics_abi.h) passes cleanly
+      mkdirSync(join(dir, 'ide', 'proj'), { recursive: true });
+      writeFileSync(join(dir, 'ide', 'proj', 'unit_abi.h'), 'typedef struct { int x; } Unit;\n', 'utf8');
+      writeFileSync(
+        join(dir, 'ide', 'proj', 'abi-golden.json'),
+        JSON.stringify({ schema: 'holo-abi-golden.v1', header: 'sections/proj/unit_abi.h' }),
+        'utf8',
+      );
+      const projectedRes = runBoundaryAudit({
+        cwd: dir,
+        manifest: {
+          schema: HOLO_BOUNDARY_SCHEMA,
+          plane: 4,
+          includePaths: ['ide'],
+          abiGoldenFiles: ['ide/proj/abi-golden.json'],
+          scanSourceHttpIpc: true,
+        },
+      });
+      assert.equal(projectedRes.ok, true);
+      assert.equal(projectedRes.axes.abiContract, 20);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

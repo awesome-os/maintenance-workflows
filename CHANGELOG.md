@@ -8,7 +8,7 @@ All notable changes to `awesome-os/maintenance-workflows` (`holo-ci@v1`) are doc
 - **Project Geometry & DAG/Layer Boundary Enforcement (`holo-ci/schema.mts`, `holo-ci/boundary.mts`):**
   - Added optional `enforceDag`, `enforceLayers`, `layerRules`, and `allowedGeometryEdges` to `HoloBoundaryManifest`, running Tarjan Strongly Connected Components (`cyclicImport`) and rank inversion checks (`layerInversion`) with `.host.mts`/type-only exemptions.
   - Hardened `matchesImportPattern` with segment-safe boundary matching (`resolve` / path segments instead of naive substring `.includes()`).
-  - Validated `abiGoldenFiles` referenced C/C++ `header` existence alongside JSON parsing (`evaluateAbiContract`).
+  - Validated `abiGoldenFiles` referenced C/C++ `header` existence alongside JSON parsing (including co-located projected headers in mirror monorepos like `devtools`, `evaluateAbiContract`).
   - Unified `b8g-allow-http-ipc` and previous-line/inline `holo-ci-allow-guard` exemptions cleanly.
 
 ## [1.1.0] - 2026-11-26
