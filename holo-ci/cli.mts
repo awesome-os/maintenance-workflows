@@ -38,6 +38,7 @@ export interface ParsedCliArgs {
   outFile?: string;
   ecosystem?: HoloCiLockCompatEcosystem;
   cwd: string;
+  minScore?: number;
   force: boolean;
   name?: string;
   kind?: HoloCiKind;
@@ -111,6 +112,7 @@ export function getHelpText(): string {
     '  --ecosystem <name>     Target ecosystem for `lock-compat`: all|npm|cargo|uv|go|vcpkg|winget|apt|composer|rubygems (aliases: php, ruby, bundler) (default: npm)',
     '  --max-lock <path>      Optional max-version-lock.json override file for `lock-compat`',
     '  --cwd <dir>            Working directory override',
+    '  --min-score <score>    Minimum boundary-audit score (0-100) required to pass',
     '  --name <name>          Project name for `init`',
     '  --kind <kind>          Project kind for `init` (monorepo|native-fork|control-plane|app)',
     '  --force                Overwrite existing holo-ci.json on `init`',
@@ -139,6 +141,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
   let outFile: string | undefined;
   let ecosystem: HoloCiLockCompatEcosystem | undefined;
   let cwd = process.cwd();
+  let minScore: number | undefined;
   let force = false;
   let name: string | undefined;
   let kind: HoloCiKind | undefined;
@@ -189,6 +192,13 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
       maxLockPath = argv[++i];
     } else if (arg === '--cwd' && argv[i + 1]) {
       cwd = resolve(argv[++i]);
+    } else if (arg === '--min-score' && argv[i + 1]) {
+      const rawScore = argv[++i];
+      const parsedScore = Number(rawScore);
+      if (!Number.isFinite(parsedScore) || parsedScore < 0 || parsedScore > 100) {
+        throw new Error(`Invalid --min-score "${rawScore}" (expected number between 0 and 100)`);
+      }
+      minScore = parsedScore;
     } else if (arg === '--force') {
       force = true;
     } else if (arg === '--name' && argv[i + 1]) {
@@ -225,6 +235,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     ...(outFile ? { outFile } : {}),
     ...(ecosystem ? { ecosystem } : {}),
     cwd,
+    ...(minScore !== undefined ? { minScore } : {}),
     force,
     ...(name ? { name } : {}),
     ...(kind ? { kind } : {}),
@@ -328,12 +339,17 @@ export async function executeCli(argv: string[]): Promise<{ exitCode: number; re
           name: opts.name ?? basename(opts.cwd),
           kind: opts.kind ?? 'app',
         };
+    const minScoreOk = opts.minScore === undefined || boundaryAudit.score >= opts.minScore;
+    const errors = minScoreOk
+      ? undefined
+      : [`Boundary audit score ${boundaryAudit.score}/100 is below minimum required ${opts.minScore}/100`];
     receipt = buildReceipt({
       manifest,
       phase: 'boundary-audit',
-      ok: boundaryAudit.ok,
+      ok: boundaryAudit.ok && minScoreOk,
       durationMs: Date.now() - start,
       boundaryAudit,
+      ...(errors ? { errors } : {}),
     });
   } else {
     const manifest = loadManifest(opts.configPath, opts.cwd);

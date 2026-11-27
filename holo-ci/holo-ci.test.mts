@@ -1403,7 +1403,7 @@ describe('holo-ci CLI', () => {
 
       const passRes = spawnSync(
         process.execPath,
-        [cliPath, 'boundary-audit', '--cwd', dir, '--boundary', 'custom-boundary.json', '--json'],
+        [cliPath, 'boundary-audit', '--cwd', dir, '--boundary', 'custom-boundary.json', '--min-score', '70', '--json'],
         { encoding: 'utf8' },
       );
       assert.equal(passRes.status, 0, passRes.stderr);
@@ -1432,6 +1432,17 @@ describe('holo-ci CLI', () => {
       assert.equal(passReceipt.boundaryAudit?.axes.encapsulation, 20);
       assert.equal(passReceipt.boundaryAudit?.axes.ipcCompliance, 20);
       assert.equal(passReceipt.boundaryAudit?.violations.length, 0);
+
+      // Verify --min-score fails cleanly when threshold exceeds actual score
+      const belowMinRes = spawnSync(
+        process.execPath,
+        [cliPath, 'boundary-audit', '--cwd', dir, '--boundary', 'custom-boundary.json', '--min-score', '95', '--json'],
+        { encoding: 'utf8' },
+      );
+      assert.equal(belowMinRes.status, 1);
+      const belowMinReceipt = JSON.parse(belowMinRes.stdout) as { ok: boolean; errors?: string[] };
+      assert.equal(belowMinReceipt.ok, false);
+      assert.match(belowMinReceipt.errors?.[0] ?? '', /below minimum required 95\/100/);
 
       // Inject a forbidden import and verify exit code 1 + violation in JSON receipt
       writeFileSync(

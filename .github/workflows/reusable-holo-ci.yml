@@ -81,6 +81,18 @@ jobs:
             --receipt "${{ github.workspace }}/holo-ci-receipt.ndjson" \
             "${EXTRA_ARGS[@]}"
           CLI_EXIT=$?
+          if [ "${{ inputs.phase }}" = "verify" ] && [ -f boundary.json ]; then
+            node "${{ github.workspace }}/.holo-ci-runtime/holo-ci/cli.mts" boundary-audit \
+              --config "${{ inputs.config-path }}" \
+              --boundary boundary.json \
+              --min-score 95 \
+              --emit-summary \
+              --receipt "${{ github.workspace }}/holo-ci-receipt.ndjson"
+            BOUNDARY_EXIT=$?
+            if [ "${BOUNDARY_EXIT}" -ne 0 ]; then
+              CLI_EXIT="${BOUNDARY_EXIT}"
+            fi
+          fi
           set -e
           BUMPED=$(node -e '
             const fs = require("node:fs");
